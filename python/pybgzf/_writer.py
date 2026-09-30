@@ -60,8 +60,10 @@ class BgzfWriter(io.RawIOBase):
     When `index` is set, every complete line is parsed with `columns` and added to a tabix or CSI
     index, which is written to `index_path` on close.
     Lines must be sorted by start within each reference, and each reference must be contiguous.
-    If a line cannot be indexed, or columns cannot be inferred, no index is written and the file is
-    left without the BGZF end-of-file marker, so that readers see it as truncated.
+    The index file is created, empty, with the writer and written on close.
+    If a line cannot be indexed, or columns cannot be inferred, the index file is removed and the
+    file is left without the BGZF end-of-file marker, so that readers see it as truncated.
+    The index file is also removed if writing fails.
     Otherwise closing, including leaving a `with` block because of an exception or the writer being
     garbage collected, finishes the file and writes the index for what was written.
 
@@ -82,7 +84,7 @@ class BgzfWriter(io.RawIOBase):
 
     Raises:
         ValueError: If the options are invalid, checked before anything is created.
-        OSError: If `dest` cannot be created.
+        OSError: If `dest` or the index cannot be created.
     """
 
     def __init__(

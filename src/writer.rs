@@ -61,6 +61,7 @@ struct Record {
 struct Indexer {
     format: IndexFormat,
     path: PathBuf,
+    file: Option<File>,
     columns: Option<Columns>,
     sniffer: Sniffer,
     partial: Vec<u8>,
@@ -135,10 +136,18 @@ fn trim_line(line: &[u8]) -> &[u8] {
 }
 
 impl Indexer {
-    fn new(options: IndexOptions) -> Self {
-        Self {
+    fn create(options: IndexOptions) -> io::Result<Self> {
+        let file = File::create(&options.path).map_err(|error| {
+            let path = options.path.display();
+            io::Error::new(
+                error.kind(),
+                format!("cannot create the index {path}: {error}"),
+            )
+        })?;
+        Ok(Self {
             format: options.format,
             path: options.path,
+            file: Some(file),
             columns: options.columns,
             sniffer: if options.bed_only {
                 Sniffer::bed()
@@ -159,6 +168,14 @@ impl Indexer {
             pending: VecDeque::new(),
             builder: None,
             failure: None,
+        })
+    }
+
+    fn remove_file(&mut self) -> io::Result<()> {
+        self.file.take();
+        match fs::remove_file(&self.path) {
+            Err(error) if error.kind() != io::ErrorKind::NotFound => Err(error),
+            _ => Ok(()),
         }
     }
 
@@ -335,7 +352,11 @@ impl Indexer {
             meta_char: columns.meta_char,
             skip_lines: columns.skip_lines as u32,
         };
-        let file = BufWriter::new(File::create(&self.path)?);
+        let file = self
+            .file
+            .take()
+            .ok_or_else(|| io::Error::other("the index was already written"))?;
+        let file = BufWriter::new(file);
         let mut file = match self.format {
             IndexFormat::Tabix => index::write_tabix(
                 file,
@@ -416,7 +437,7 @@ impl<W: Write> Writer<W> {
         let (level, threads) = check_options(i64::from(level), threads as i64, index.as_ref())?;
         Ok(Self {
             blocks: BlockWriter::new(sink, level, threads)?,
-            indexer: index.map(Indexer::new),
+            indexer: index.map(Indexer::create).transpose()?,
             final_columns: None,
             io_failure: None,
             finished: false,
@@ -442,11 +463,7 @@ impl<W: Write> Writer<W> {
                 "I/O operation on a closed writer",
             )));
         }
-        if let Some(message) = &self.io_failure {
-            return Err(Error::Io(io::Error::other(format!(
-                "the writer failed earlier: {message}"
-            ))));
-        }
+        self.check_io()?;
         if let Some(message) = self
             .indexer
             .as_ref()
@@ -530,23 +547,34 @@ impl<W: Write> Writer<W> {
     /// Writes the end-of-file marker and then the index, if one was requested.
     ///
     /// After an indexing error, the data is written without the end-of-file marker, so that
-    /// readers see it as truncated, no index is written, and any existing file at the index path
-    /// is removed. An error already reported by [`Writer::write`] is not reported again.
+    /// readers see it as truncated. After any error, the index file, which was created empty
+    /// with the writer, is removed. An indexing error already reported by [`Writer::write`] is
+    /// not reported again.
     pub fn finish(&mut self) -> Result<()> {
         if self.finished {
             return Ok(());
         }
         self.finished = true;
-        if let Some(message) = &self.io_failure {
-            return Err(Error::Io(io::Error::other(format!(
-                "the writer failed earlier: {message}"
-            ))));
-        }
         let Some(mut indexer) = self.indexer.take() else {
+            self.check_io()?;
             return self.blocks.finish().map(drop).map_err(Error::Io);
         };
         let reported = indexer.failure.is_some();
-        if !reported && !indexer.partial.is_empty() {
+        match self.finish_indexed(&mut indexer) {
+            Ok(()) => Ok(()),
+            Err(error) => {
+                indexer.remove_file()?;
+                match error {
+                    Error::Invalid(_) if reported => Ok(()),
+                    error => Err(error),
+                }
+            }
+        }
+    }
+
+    fn finish_indexed(&mut self, indexer: &mut Indexer) -> Result<()> {
+        self.check_io()?;
+        if indexer.failure.is_none() && !indexer.partial.is_empty() {
             let line = std::mem::take(&mut indexer.partial);
             match indexer.classify(trim_line(&line)) {
                 Ok(record) => indexer.commit(record, self.blocks.position()),
@@ -557,34 +585,25 @@ impl<W: Write> Writer<W> {
         if indexer.failure.is_none() && indexer.columns.is_none() {
             indexer.failure = Some(NO_COLUMNS.into());
         }
-        let final_offset = if indexer.failure.is_some() {
-            self.blocks.abandon()
-        } else {
-            self.blocks.finish()
+        if let Some(message) = indexer.failure.take() {
+            self.blocks.abandon()?;
+            return Err(Error::Invalid(message));
         }
-        .map_err(Error::Io)?;
-        let outcome = match indexer.failure.take() {
-            Some(message) => Err(Error::Invalid(message)),
-            None => {
-                indexer.resolve(&mut self.blocks);
-                let first_offset = self
-                    .blocks
-                    .resolve(indexer.first_offset)
-                    .unwrap_or(final_offset);
-                indexer.write_index(final_offset, first_offset)
-            }
-        };
-        match outcome {
-            Ok(()) => Ok(()),
-            Err(error) => {
-                let path = std::mem::take(&mut indexer.path);
-                if let Err(e) = fs::remove_file(&path)
-                    && e.kind() != io::ErrorKind::NotFound
-                {
-                    return Err(Error::Io(e));
-                }
-                if reported { Ok(()) } else { Err(error) }
-            }
+        let final_offset = self.blocks.finish()?;
+        indexer.resolve(&mut self.blocks);
+        let first_offset = self
+            .blocks
+            .resolve(indexer.first_offset)
+            .unwrap_or(final_offset);
+        indexer.write_index(final_offset, first_offset)
+    }
+
+    fn check_io(&self) -> Result<()> {
+        match &self.io_failure {
+            Some(message) => Err(Error::Io(io::Error::other(format!(
+                "the writer failed earlier: {message}"
+            )))),
+            None => Ok(()),
         }
     }
 

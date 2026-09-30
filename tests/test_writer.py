@@ -1,3 +1,4 @@
+import contextlib
 import csv
 import gzip
 import io
@@ -591,3 +592,24 @@ def test_tell_after_a_sink_failure_raises(threads: int) -> None:
     assert bytes(sink.received) == received
     with pytest.raises(OSError, match="failed earlier"):
         writer.close()
+
+
+@pytest.mark.parametrize("lines", [10_000, 1], ids=["mid-stream", "end-of-file marker"])
+def test_a_sink_failure_removes_a_stale_index(tmp_path: Path, lines: int) -> None:
+    index_path = tmp_path / "stale.tbi"
+    index_path.write_bytes(b"an index from an earlier run")
+    writer = BgzfWriter(
+        _FailsOnce(failing_call=2), index=IndexFormat.TBI, index_path=index_path, columns=BED
+    )
+    with pytest.raises(OSError, match="No space left"):
+        writer.write(b"".join(b"chr1\t%d\t%d\n" % (i, i + 10) for i in range(lines)))
+        writer.close()
+    with contextlib.suppress(OSError):
+        writer.close()
+    assert not index_path.exists()
+
+
+def test_an_index_path_that_cannot_be_created_fails_at_once(tmp_path: Path) -> None:
+    index_path = tmp_path / "missing" / "out.tbi"
+    with pytest.raises(FileNotFoundError, match="missing"):
+        BgzfWriter(io.BytesIO(), index=IndexFormat.TBI, index_path=index_path, columns=BED)
