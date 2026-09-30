@@ -73,6 +73,8 @@ class BgzfWriter(io.RawIOBase):
     The index file is also removed if writing fails.
     Otherwise closing, including leaving a `with` block because of an exception or the writer being
     garbage collected, finishes the file and writes the index for what was written.
+    Threads sharing a writer take turns, as with the standard library's buffered files, so the
+    bytes of each write stay together.
 
     Args:
         dest: A path to create, or a writable binary file-like object such as a pipe.

@@ -4,11 +4,14 @@ use std::collections::VecDeque;
 use std::fs::File;
 use std::io::{self, BufRead, BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::num::NonZero;
+use std::ops::{Deref, DerefMut};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Mutex, MutexGuard, PoisonError, TryLockError};
 use std::thread;
 
 use pyo3::buffer::PyBuffer;
-use pyo3::exceptions::{PyOSError, PyUserWarning, PyValueError};
+use pyo3::exceptions::{PyOSError, PyRuntimeError, PyUserWarning, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyString};
 
@@ -152,10 +155,111 @@ fn columns_to_tuple(columns: &Columns) -> ColumnsTuple {
     )
 }
 
+/// Returns an address that no other running thread shares.
+fn this_thread() -> usize {
+    thread_local! {
+        static MARK: u8 = const { 0 };
+    }
+    MARK.with(|mark| std::ptr::from_ref(mark).addr())
+}
+
+/// A mutex that threads wait for without the GIL, and that raises on a reentrant call.
+struct Lock<T> {
+    mutex: Mutex<T>,
+    owner: AtomicUsize,
+}
+
+struct Guard<'a, T> {
+    inner: MutexGuard<'a, T>,
+    owner: &'a AtomicUsize,
+}
+
+impl<T> Deref for Guard<'_, T> {
+    type Target = T;
+
+    fn deref(&self) -> &T {
+        &self.inner
+    }
+}
+
+impl<T> DerefMut for Guard<'_, T> {
+    fn deref_mut(&mut self) -> &mut T {
+        &mut self.inner
+    }
+}
+
+impl<T> Drop for Guard<'_, T> {
+    fn drop(&mut self) {
+        self.owner.store(0, Ordering::Relaxed);
+    }
+}
+
+impl<T: Send> Lock<T> {
+    fn new(value: T) -> Self {
+        Self {
+            mutex: Mutex::new(value),
+            owner: AtomicUsize::new(0),
+        }
+    }
+
+    fn guard<'a>(&'a self, inner: MutexGuard<'a, T>) -> Guard<'a, T> {
+        self.owner.store(this_thread(), Ordering::Relaxed);
+        Guard {
+            inner,
+            owner: &self.owner,
+        }
+    }
+
+    fn try_lock(&self) -> Option<Guard<'_, T>> {
+        match self.mutex.try_lock() {
+            Ok(inner) => Some(self.guard(inner)),
+            Err(TryLockError::Poisoned(poisoned)) => Some(self.guard(poisoned.into_inner())),
+            Err(TryLockError::WouldBlock) => None,
+        }
+    }
+
+    /// Waits for the lock; called without the GIL.
+    fn lock(&self) -> PyResult<Guard<'_, T>> {
+        if self.owner.load(Ordering::Relaxed) == this_thread() {
+            return Err(PyRuntimeError::new_err("reentrant call"));
+        }
+        let inner = self.mutex.lock().unwrap_or_else(PoisonError::into_inner);
+        Ok(self.guard(inner))
+    }
+
+    /// Calls a quick `f`, releasing the GIL only to wait for another thread.
+    fn with<R: Send>(
+        &self,
+        py: Python<'_>,
+        f: impl FnOnce(&mut T) -> PyResult<R> + Send,
+    ) -> PyResult<R> {
+        match self.try_lock() {
+            Some(mut guard) => f(&mut guard),
+            None => py.detach(|| f(&mut *self.lock()?)),
+        }
+    }
+
+    fn get_mut(&mut self) -> &mut T {
+        self.mutex.get_mut().unwrap_or_else(PoisonError::into_inner)
+    }
+}
+
+fn closed_error() -> PyErr {
+    PyValueError::new_err("I/O operation on closed file.")
+}
+
+fn open_writer(inner: &mut CoreWriter<Sink>) -> PyResult<&mut CoreWriter<Sink>> {
+    if inner.is_finished() {
+        return Err(closed_error());
+    }
+    Ok(inner)
+}
+
 /// The Rust half of `pybgzf.BgzfWriter`.
-#[pyclass(module = "pybgzf._pybgzf")]
+#[pyclass(module = "pybgzf._pybgzf", frozen)]
 struct Writer {
-    inner: CoreWriter<Sink>,
+    inner: Lock<CoreWriter<Sink>>,
+    closed: AtomicBool,
 }
 
 #[pymethods]
@@ -201,11 +305,14 @@ impl Writer {
             Sink::Python(dest.clone().unbind())
         };
         let inner = CoreWriter::new(sink, level, threads, options).map_err(to_python)?;
-        Ok(Self { inner })
+        Ok(Self {
+            inner: Lock::new(inner),
+            closed: AtomicBool::new(false),
+        })
     }
 
     /// Writes bytes-like `data` and returns the number of bytes written.
-    fn write(&mut self, py: Python<'_>, data: &Bound<'_, PyAny>) -> PyResult<usize> {
+    fn write(&self, py: Python<'_>, data: &Bound<'_, PyAny>) -> PyResult<usize> {
         let owned;
         let bytes: &[u8] = if let Ok(bytes) = data.cast::<PyBytes>() {
             bytes.as_bytes()
@@ -213,46 +320,57 @@ impl Writer {
             owned = PyBuffer::<u8>::get(data)?.to_vec(py)?;
             &owned
         };
-        let inner = &mut self.inner;
-        if inner.may_block(bytes.len()) {
-            py.detach(|| inner.write(bytes)).map_err(to_python)?;
-        } else {
-            inner.write(bytes).map_err(to_python)?;
+        let write =
+            |inner: &mut CoreWriter<Sink>| open_writer(inner)?.write(bytes).map_err(to_python);
+        match self
+            .inner
+            .try_lock()
+            .filter(|inner| !inner.may_block(bytes.len()))
+        {
+            Some(mut inner) => write(&mut inner)?,
+            None => py.detach(|| write(&mut *self.inner.lock()?))?,
         }
         Ok(bytes.len())
     }
 
     /// Ends the current block and flushes the sink.
-    fn flush(&mut self, py: Python<'_>) -> PyResult<()> {
-        let inner = &mut self.inner;
-        py.detach(|| inner.flush()).map_err(to_python)
+    fn flush(&self, py: Python<'_>) -> PyResult<()> {
+        py.detach(|| {
+            open_writer(&mut *self.inner.lock()?)?
+                .flush()
+                .map_err(to_python)
+        })
     }
 
     /// Returns the virtual position of the next byte.
-    fn tell(&mut self, py: Python<'_>) -> PyResult<u64> {
-        let inner = &mut self.inner;
-        py.detach(|| inner.tell()).map_err(to_python)
+    fn tell(&self, py: Python<'_>) -> PyResult<u64> {
+        py.detach(|| {
+            open_writer(&mut *self.inner.lock()?)?
+                .tell()
+                .map_err(to_python)
+        })
     }
 
-    /// Writes the end-of-file marker and the index, if any.
-    fn close(&mut self, py: Python<'_>) -> PyResult<()> {
-        let inner = &mut self.inner;
-        let finished = py.detach(|| {
+    /// Writes the end-of-file marker and the index, if any, once any call in progress returns.
+    fn close(&self, py: Python<'_>) -> PyResult<()> {
+        py.detach(|| {
+            let mut inner = self.inner.lock()?;
             let finished = inner.finish();
             *inner.get_mut() = Sink::Closed;
-            finished
-        });
-        finished.map_err(to_python)
+            self.closed.store(true, Ordering::Release);
+            finished.map_err(to_python)
+        })
     }
 
     #[getter]
     fn closed(&self) -> bool {
-        self.inner.is_finished()
+        self.closed.load(Ordering::Acquire)
     }
 
     #[getter]
-    fn columns(&self) -> Option<ColumnsTuple> {
-        self.inner.columns().map(columns_to_tuple)
+    fn columns(&self, py: Python<'_>) -> PyResult<Option<ColumnsTuple>> {
+        self.inner
+            .with(py, |inner| Ok(inner.columns().map(columns_to_tuple)))
     }
 }
 
@@ -377,53 +495,109 @@ fn path_error(error: io::Error, path: Option<&Path>) -> PyErr {
     }
 }
 
+/// Stops a reader's threads, in the background when `background` is set.
+fn stop<T: Send + 'static>(inner: T, background: bool) {
+    if background {
+        drop(thread::Builder::new().spawn(move || drop(inner)));
+    } else {
+        drop(inner);
+    }
+}
+
 /// A reader until it is closed, which stops its threads without the GIL, in the background when
 /// `background` is set, such as for a pipe whose writer is idle, so that closing never waits on
-/// a read that may not return.
+/// a read that may not return. Threads take turns with it, and `closed` never waits for a turn.
 struct Open<T: Send + 'static> {
-    inner: Option<T>,
+    inner: Lock<Option<T>>,
     background: bool,
+    closed: AtomicBool,
 }
 
 impl<T: Send + 'static> Open<T> {
-    fn get(&mut self) -> PyResult<&mut T> {
-        self.inner
-            .as_mut()
-            .ok_or_else(|| PyValueError::new_err("I/O operation on closed file."))
+    fn new(inner: T, background: bool) -> Self {
+        Self {
+            inner: Lock::new(Some(inner)),
+            background,
+            closed: AtomicBool::new(false),
+        }
     }
 
-    fn close(&mut self, py: Python<'_>) {
-        if let Some(inner) = self.inner.take() {
-            let background = self.background;
-            py.detach(move || {
-                if background {
-                    drop(thread::Builder::new().spawn(move || drop(inner)));
-                } else {
-                    drop(inner);
-                }
-            });
-        }
+    /// Calls a quick `f` with the reader, releasing the GIL only to wait for another thread.
+    fn with<R: Send>(
+        &self,
+        py: Python<'_>,
+        f: impl FnOnce(&mut T) -> PyResult<R> + Send,
+    ) -> PyResult<R> {
+        self.inner
+            .with(py, |inner| f(inner.as_mut().ok_or_else(closed_error)?))
+    }
+
+    /// Calls `f` with the reader; called without the GIL.
+    fn locked<R>(&self, f: impl FnOnce(&mut T) -> PyResult<R>) -> PyResult<R> {
+        f(self.inner.lock()?.as_mut().ok_or_else(closed_error)?)
+    }
+
+    /// Calls `f` with the reader without the GIL.
+    fn detached<R: Send>(
+        &self,
+        py: Python<'_>,
+        f: impl FnOnce(&mut T) -> PyResult<R> + Send,
+    ) -> PyResult<R> {
+        py.detach(|| self.locked(f))
+    }
+
+    /// Stops the reader once any call in progress returns.
+    fn close(&self, py: Python<'_>) -> PyResult<()> {
+        py.detach(|| {
+            let inner = {
+                let mut inner = self.inner.lock()?;
+                self.closed.store(true, Ordering::Release);
+                inner.take()
+            };
+            if let Some(inner) = inner {
+                stop(inner, self.background);
+            }
+            Ok(())
+        })
+    }
+
+    fn closed(&self) -> bool {
+        self.closed.load(Ordering::Acquire)
     }
 }
 
 impl<T: Send + 'static> Drop for Open<T> {
     fn drop(&mut self) {
-        if self.inner.is_some() {
-            Python::attach(|py| self.close(py));
+        if let Some(inner) = self.inner.get_mut().take() {
+            let background = self.background;
+            Python::attach(|py| py.detach(|| stop(inner, background)));
         }
     }
 }
 
 /// The Rust half of `pybgzf.BgzfReader`.
-#[pyclass(module = "pybgzf._pybgzf")]
+#[pyclass(module = "pybgzf._pybgzf", frozen)]
 struct Reader {
     inner: Open<BgzfReader<Source>>,
     path: Option<PathBuf>,
 }
 
 impl Reader {
-    fn inner(&mut self) -> PyResult<(&mut BgzfReader<Source>, Option<&Path>)> {
-        Ok((self.inner.get()?, self.path.as_deref()))
+    /// Reads with `f` without the GIL, then warns if the data ended without an end-of-file marker.
+    fn read_with<T: Send>(
+        &self,
+        py: Python<'_>,
+        f: impl FnOnce(&mut BgzfReader<Source>) -> io::Result<T> + Send,
+    ) -> PyResult<T> {
+        let path = self.path.as_deref();
+        let (value, truncated) = self.inner.detached(py, |inner| {
+            let value = f(inner).map_err(|e| path_error(e, path))?;
+            Ok((value, inner.take_missing_eof_marker()))
+        })?;
+        if truncated {
+            warn_truncated(py, path)?;
+        }
+        Ok(value)
     }
 }
 
@@ -450,79 +624,71 @@ impl Reader {
         let inner = py
             .detach(|| BgzfReader::new(source, threads))
             .map_err(|e| path_error(e, path.as_deref()))?;
-        let inner = Open {
-            inner: Some(inner),
-            background: may_block && threads.get() > 1,
-        };
+        let inner = Open::new(inner, may_block && threads.get() > 1);
         Ok(Self { inner, path })
     }
 
     /// Reads up to `size` bytes, fewer only at the end of the stream.
-    fn read<'py>(&mut self, py: Python<'py>, size: usize) -> PyResult<Bound<'py, PyBytes>> {
-        let (inner, path) = self.inner()?;
-        let mut buf = Vec::with_capacity(size);
-        py.detach(|| (&mut *inner).take(size as u64).read_to_end(&mut buf))
-            .map_err(|e| path_error(e, path))?;
-        if inner.take_missing_eof_marker() {
-            warn_truncated(py, path)?;
-        }
+    fn read<'py>(&self, py: Python<'py>, size: usize) -> PyResult<Bound<'py, PyBytes>> {
+        let buf = self.read_with(py, |inner| {
+            let mut buf = Vec::with_capacity(size);
+            inner.take(size as u64).read_to_end(&mut buf)?;
+            Ok(buf)
+        })?;
         Ok(PyBytes::new(py, &buf))
     }
 
     /// Reads everything that is left.
-    fn readall<'py>(&mut self, py: Python<'py>) -> PyResult<Bound<'py, PyBytes>> {
-        let (inner, path) = self.inner()?;
-        let mut buf = Vec::new();
-        py.detach(|| inner.read_to_end(&mut buf))
-            .map_err(|e| path_error(e, path))?;
-        if inner.take_missing_eof_marker() {
-            warn_truncated(py, path)?;
-        }
+    fn readall<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyBytes>> {
+        let buf = self.read_with(py, |inner| {
+            let mut buf = Vec::new();
+            inner.read_to_end(&mut buf)?;
+            Ok(buf)
+        })?;
         Ok(PyBytes::new(py, &buf))
     }
 
     /// Reads through the next newline, or at most `size` bytes when `size` is not negative.
-    fn readline<'py>(&mut self, py: Python<'py>, size: i64) -> PyResult<Bound<'py, PyBytes>> {
-        let (inner, path) = self.inner()?;
+    fn readline<'py>(&self, py: Python<'py>, size: i64) -> PyResult<Bound<'py, PyBytes>> {
         let limit = u64::try_from(size).unwrap_or(u64::MAX);
-        let mut line = Vec::new();
-        py.detach(|| (&mut *inner).take(limit).read_until(b'\n', &mut line))
-            .map_err(|e| path_error(e, path))?;
-        if inner.take_missing_eof_marker() {
-            warn_truncated(py, path)?;
-        }
+        let line = self.read_with(py, |inner| {
+            let mut line = Vec::new();
+            inner.take(limit).read_until(b'\n', &mut line)?;
+            Ok(line)
+        })?;
         Ok(PyBytes::new(py, &line))
     }
 
     /// Returns the virtual position of the next byte.
-    fn tell(&mut self) -> PyResult<u64> {
-        Ok(self.inner()?.0.virtual_position())
+    fn tell(&self, py: Python<'_>) -> PyResult<u64> {
+        self.inner.with(py, |inner| Ok(inner.virtual_position()))
     }
 
     /// Moves to a virtual position.
-    fn seek(&mut self, py: Python<'_>, position: u64) -> PyResult<u64> {
-        let (inner, path) = self.inner()?;
-        py.detach(|| inner.seek(position))
-            .map_err(|error| match error.kind() {
+    fn seek(&self, py: Python<'_>, position: u64) -> PyResult<u64> {
+        let path = self.path.as_deref();
+        self.inner.detached(py, |inner| {
+            inner.seek(position).map_err(|error| match error.kind() {
                 io::ErrorKind::InvalidInput => PyValueError::new_err(error.to_string()),
                 _ => path_error(error, path),
             })?;
-        Ok(inner.virtual_position())
+            Ok(inner.virtual_position())
+        })
     }
 
     /// Stops any worker threads.
-    fn close(&mut self, py: Python<'_>) {
-        self.inner.close(py);
+    fn close(&self, py: Python<'_>) -> PyResult<()> {
+        self.inner.close(py)
     }
 
     #[getter]
     fn closed(&self) -> bool {
-        self.inner.inner.is_none()
+        self.inner.closed()
     }
 }
 
 /// The Rust half of `pybgzf.IndexedReader`.
-#[pyclass(module = "pybgzf._pybgzf")]
+#[pyclass(module = "pybgzf._pybgzf", frozen)]
 struct IndexedReader {
     inner: Open<CoreIndexedReader<BufReader<File>>>,
     path: PathBuf,
@@ -553,68 +719,100 @@ impl IndexedReader {
         {
             warn_truncated(py, Some(&path))?;
         }
-        let inner = Open {
-            inner: Some(inner),
-            background: false,
-        };
+        let inner = Open::new(inner, false);
         Ok(Self { inner, path })
     }
 
     /// Starts a query for lines overlapping the 0-based, half-open `[start, end)` on `refname`.
     fn query(slf: Bound<'_, Self>, refname: &str, start: i64, end: i64) -> PyResult<QueryIterator> {
-        let query = slf
-            .borrow_mut()
-            .inner
-            .get()?
-            .query(refname.as_bytes(), start, end)
-            .map_err(io_to_python)?;
-        Ok(QueryIterator {
-            reader: slf.unbind(),
+        let query = slf.get().inner.with(slf.py(), |inner| {
+            inner
+                .query(refname.as_bytes(), start, end)
+                .map_err(io_to_python)
+        })?;
+        let state = Lock::new(QueryState {
             query,
             lines: VecDeque::new(),
+        });
+        Ok(QueryIterator {
+            reader: slf.unbind(),
+            state,
         })
     }
 
     #[getter]
-    fn refnames(&mut self) -> PyResult<Vec<String>> {
-        self.inner
-            .get()?
-            .names()
-            .map(|name| {
-                String::from_utf8(name.to_vec()).map_err(|_| {
-                    PyValueError::new_err(format!(
-                        "the reference name {:?} in the index is not UTF-8",
-                        String::from_utf8_lossy(name)
-                    ))
+    fn refnames(&self, py: Python<'_>) -> PyResult<Vec<String>> {
+        self.inner.with(py, |inner| {
+            inner
+                .names()
+                .map(|name| {
+                    String::from_utf8(name.to_vec()).map_err(|_| {
+                        PyValueError::new_err(format!(
+                            "the reference name {:?} in the index is not UTF-8",
+                            String::from_utf8_lossy(name)
+                        ))
+                    })
                 })
-            })
-            .collect()
+                .collect()
+        })
     }
 
     #[getter]
-    fn columns(&mut self) -> PyResult<ColumnsTuple> {
-        Ok(columns_to_tuple(self.inner.get()?.columns()))
+    fn columns(&self, py: Python<'_>) -> PyResult<ColumnsTuple> {
+        self.inner
+            .with(py, |inner| Ok(columns_to_tuple(inner.columns())))
     }
 
     /// Stops any worker threads.
-    fn close(&mut self, py: Python<'_>) {
-        self.inner.close(py);
+    fn close(&self, py: Python<'_>) -> PyResult<()> {
+        self.inner.close(py)
     }
 
     #[getter]
     fn closed(&self) -> bool {
-        self.inner.inner.is_none()
+        self.inner.closed()
     }
 }
 
 const QUERY_BATCH: usize = 256 * 1024;
 
-/// Lines overlapping a region, read in batches with the GIL released.
-#[pyclass(module = "pybgzf._pybgzf")]
-struct QueryIterator {
-    reader: Py<IndexedReader>,
+struct QueryState {
     query: Query,
     lines: VecDeque<String>,
+}
+
+/// Lines overlapping a region, read in batches with the GIL released.
+#[pyclass(module = "pybgzf._pybgzf", frozen)]
+struct QueryIterator {
+    reader: Py<IndexedReader>,
+    state: Lock<QueryState>,
+}
+
+impl QueryIterator {
+    /// Returns the next line, reading a batch if none is left; called without the GIL.
+    fn next_line(&self) -> PyResult<Option<String>> {
+        let mut state = self.state.lock()?;
+        let state = &mut *state;
+        let reader = self.reader.get();
+        loop {
+            if let Some(line) = state.lines.pop_front() {
+                return Ok(Some(line));
+            }
+            if state.query.done {
+                return Ok(None);
+            }
+            let mut batch = Vec::new();
+            reader.inner.locked(|inner| {
+                inner
+                    .next_lines(&mut state.query, &mut batch, QUERY_BATCH)
+                    .map_err(|error| match error {
+                        Error::Io(error) => path_error(error, Some(&reader.path)),
+                        Error::Invalid(message) => PyValueError::new_err(message),
+                    })
+            })?;
+            state.lines.extend(batch);
+        }
+    }
 }
 
 #[pymethods]
@@ -623,25 +821,16 @@ impl QueryIterator {
         slf
     }
 
-    fn __next__<'py>(&mut self, py: Python<'py>) -> PyResult<Option<Bound<'py, PyString>>> {
-        loop {
-            if let Some(line) = self.lines.pop_front() {
-                return Ok(Some(PyString::new(py, &line)));
-            }
-            if self.query.done {
-                return Ok(None);
-            }
-            let mut reader = self.reader.bind(py).borrow_mut();
-            let inner = reader.inner.get()?;
-            let query = &mut self.query;
-            let mut batch = Vec::new();
-            py.detach(|| inner.next_lines(query, &mut batch, QUERY_BATCH))
-                .map_err(|error| match error {
-                    Error::Io(error) => path_error(error, Some(&reader.path)),
-                    Error::Invalid(message) => PyValueError::new_err(message),
-                })?;
-            self.lines.extend(batch);
-        }
+    fn __next__<'py>(&self, py: Python<'py>) -> PyResult<Option<Bound<'py, PyString>>> {
+        let line = match self
+            .state
+            .try_lock()
+            .and_then(|mut state| state.lines.pop_front())
+        {
+            Some(line) => Some(line),
+            None => py.detach(|| self.next_line())?,
+        };
+        Ok(line.map(|line| PyString::new(py, &line)))
     }
 }
 
