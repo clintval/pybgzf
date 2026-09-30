@@ -369,9 +369,15 @@ impl Read for Source {
                     .map_err(python_to_io)?
                     .to_vec(py)
                     .map_err(python_to_io)?;
-                let n = data.len().min(buf.len());
-                buf[..n].copy_from_slice(&data[..n]);
-                Ok(n)
+                if data.len() > buf.len() {
+                    return Err(io::Error::other(format!(
+                        "read({}) returned {} bytes",
+                        buf.len(),
+                        data.len()
+                    )));
+                }
+                buf[..data.len()].copy_from_slice(&data);
+                Ok(data.len())
             }),
         }
     }

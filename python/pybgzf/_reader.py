@@ -49,9 +49,11 @@ class BgzfReader(io.RawIOBase):
         if isinstance(src, (str, os.PathLike)):
             source: str | ReadableBinary = os.fspath(src)
             self._name: object = source
-        else:
+        elif callable(getattr(src, "read", None)):
             source = src
             self._name = getattr(src, "name", None)
+        else:
+            raise TypeError(f"expected a path or an object with a read method, not {src!r}")
         self._inner: _pybgzf.Reader = _pybgzf.Reader(source, threads=threads)
 
     @property

@@ -5,6 +5,7 @@ import random
 import shutil
 import threading
 from pathlib import Path
+from typing import cast
 
 import pybgzf
 import pytest
@@ -13,6 +14,7 @@ from pybgzf import BgzfWriter
 from pybgzf import Columns
 from pybgzf import IndexedReader
 from pybgzf import IndexFormat
+from pybgzf import ReadableBinary
 
 from tests.helpers import bed_lines
 from tests.helpers import requires_htslib
@@ -479,3 +481,54 @@ def test_seeking_outside_the_file_raises(data_dir: Path, threads: int) -> None:
                 reader.seek(position)
         reader.seek(0)
         assert reader.readline() == first
+
+
+class _Source:
+    def __init__(self, data: bytes, kind: str) -> None:
+        self.data: io.BytesIO = io.BytesIO(data)
+        self.kind: str = kind
+
+    def read(self, size: int, /) -> object:
+        if self.kind == "raises" and self.data.tell() > 100_000:
+            raise PermissionError("the source failed")
+        if self.kind == "str":
+            return "text"
+        if self.kind == "none":
+            return None
+        if self.kind == "too much":
+            return self.data.read(size + 1)
+        if self.kind == "short":
+            return self.data.read(min(size, 7))
+        return self.data.read(size)
+
+
+def readable(data: bytes, kind: str) -> ReadableBinary:
+    return cast(ReadableBinary, cast(object, _Source(data, kind)))
+
+
+@pytest.mark.parametrize("threads", [1, 3])
+@pytest.mark.parametrize(
+    ("kind", "error"),
+    [("raises", PermissionError), ("str", TypeError), ("none", OSError), ("too much", OSError)],
+)
+def test_source_errors_raise(
+    data_dir: Path, threads: int, kind: str, error: type[Exception]
+) -> None:
+    compressed = bed_path(data_dir, IndexFormat.TBI).read_bytes()
+    with pytest.raises(error), BgzfReader(readable(compressed, kind), threads=threads) as reader:
+        reader.readall()
+
+
+@pytest.mark.parametrize("threads", [1, 3])
+def test_short_reads_from_a_source(threads: int) -> None:
+    stream = io.BytesIO()
+    with BgzfWriter(stream) as writer:
+        writer.write(b"".join(b"line %d\n" % number for number in range(20_000)))
+    compressed = stream.getvalue()
+    with BgzfReader(readable(compressed, "short"), threads=threads) as reader:
+        assert reader.readall() == gzip.decompress(compressed)
+
+
+def test_sources_without_read_raise_at_once() -> None:
+    with pytest.raises(TypeError, match="read"):
+        BgzfReader(cast(str, cast(object, b"features.bed.gz")))
