@@ -72,7 +72,6 @@ class BgzfReader(io.RawIOBase):
     @override
     def readinto(self, buffer: Buffer, /) -> int:
         """Read into a writable buffer and return the number of bytes read."""
-        self._check_open()
         view = memoryview(buffer).cast("B")
         data = self._inner.read(len(view))
         view[: len(data)] = data
@@ -81,21 +80,16 @@ class BgzfReader(io.RawIOBase):
     @override
     def readall(self) -> bytes:
         """Read and return everything left."""
-        self._check_open()
         return self._inner.readall()
 
     @override
     def readline(self, size: int | None = -1, /) -> bytes:
         """Read and return the next line, including its newline."""
-        self._check_open()
-        if size is not None and size >= 0:
-            return super().readline(size)
-        return self._inner.readline()
+        return self._inner.readline(-1 if size is None else size)
 
     @override
     def tell(self) -> int:
         """Return the virtual offset of the next byte to be read."""
-        self._check_open()
         return self._inner.tell()
 
     @override
@@ -107,7 +101,6 @@ class BgzfReader(io.RawIOBase):
         Raises:
             ValueError: If the offset is in no block of the file and is not its end.
         """
-        self._check_open()
         if whence != io.SEEK_SET:
             raise io.UnsupportedOperation("only seeking to a virtual offset is supported")
         if offset < 0:
@@ -131,10 +124,6 @@ class BgzfReader(io.RawIOBase):
                 inner.close()
         finally:
             super().close()
-
-    def _check_open(self) -> None:
-        if self.closed:
-            raise ValueError("I/O operation on closed file.")
 
 
 def reader(
@@ -198,7 +187,7 @@ class IndexedReader:
                 )
             index_path = found[0]
         self._inner: _pybgzf.IndexedReader = _pybgzf.IndexedReader(
-            file, os.fspath(index_path), threads=threads
+            file, index_path, threads=threads
         )
 
     @property

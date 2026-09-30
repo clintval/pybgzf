@@ -3,21 +3,23 @@
 use memchr::{memchr, memmem};
 
 /// How a line's end is found, and the format code written to the index header.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(
+    feature = "python",
+    pyo3::pyclass(
+        module = "pybgzf._pybgzf",
+        name = "LineKind",
+        rename_all = "UPPERCASE",
+        eq,
+        frozen,
+        hash,
+        from_py_object
+    )
+)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Kind {
     Generic,
     Sam,
     Vcf,
-}
-
-impl Kind {
-    pub fn name(self) -> &'static str {
-        match self {
-            Kind::Generic => "generic",
-            Kind::Sam => "sam",
-            Kind::Vcf => "vcf",
-        }
-    }
 }
 
 /// Which columns hold each line's reference, start, and end, like `tabix -s -b -e -0 -c -S`.
@@ -55,68 +57,52 @@ impl Columns {
 
     pub fn bed2() -> Self {
         Self {
-            refname: 1,
-            start: 2,
             end: None,
-            zero_based: true,
-            meta_char: b'#',
-            skip_lines: 0,
-            kind: Kind::Generic,
+            ..Self::bed()
         }
     }
 
     pub fn gff() -> Self {
         Self {
-            refname: 1,
             start: 4,
             end: Some(5),
             zero_based: false,
-            meta_char: b'#',
-            skip_lines: 0,
-            kind: Kind::Generic,
+            ..Self::bed()
         }
     }
 
     pub fn vcf() -> Self {
         Self {
-            refname: 1,
-            start: 2,
             end: None,
             zero_based: false,
-            meta_char: b'#',
-            skip_lines: 0,
             kind: Kind::Vcf,
+            ..Self::bed()
         }
     }
 
     pub fn sam() -> Self {
         Self {
             refname: 3,
-            start: 4,
             end: None,
-            zero_based: false,
             meta_char: b'@',
-            skip_lines: 0,
             kind: Kind::Sam,
+            ..Self::gff()
         }
     }
 
     /// Checks that the columns describe a layout tabix can record.
     pub fn validate(&self) -> Result<(), String> {
-        let limit = i32::MAX as usize;
-        if !(1..=limit).contains(&self.refname) || !(1..=limit).contains(&self.start) {
-            return Err("column numbers are 1-based and must be positive".into());
-        }
-        if self.end.is_some_and(|end| !(1..=limit).contains(&end)) {
+        let valid = |column: usize| (1..=i32::MAX as usize).contains(&column);
+        if !valid(self.refname) || !valid(self.start) || self.end.is_some_and(|end| !valid(end)) {
             return Err("column numbers are 1-based and must be positive".into());
         }
         if self.skip_lines > i32::MAX as u64 {
             return Err("skip_lines is too large".into());
         }
         if self.kind != Kind::Generic && (self.end.is_some() || self.zero_based) {
+            let kind = if self.kind == Kind::Sam { "SAM" } else { "VCF" };
             return Err(format!(
-                "{} columns compute their own end and are 1-based",
-                self.kind.name().to_uppercase()
+                "{kind} columns compute their own end and are 1-based"
             ));
         }
         if !self.meta_char.is_ascii() {
@@ -209,26 +195,20 @@ fn finish(name: Option<&[u8]>, beg: i64, end: i64, columns: usize) -> Result<Int
 /// Unlike htslib, which calls `strtoll` in base 0, a leading `0` or `0x` is not octal or hex.
 fn integer_prefix(bytes: &[u8]) -> Option<(i64, usize)> {
     let mut i = bytes.iter().take_while(|b| b.is_ascii_whitespace()).count();
-    let negative = match bytes.get(i) {
-        Some(b'-') => {
-            i += 1;
-            true
-        }
-        Some(b'+') => {
-            i += 1;
-            false
-        }
-        _ => false,
-    };
-    let digits = bytes[i..].iter().take_while(|b| b.is_ascii_digit()).count();
-    if digits == 0 {
-        return None;
-    }
-    let mut value: i64 = 0;
-    for &b in &bytes[i..i + digits] {
-        value = value.saturating_mul(10).saturating_add(i64::from(b - b'0'));
-    }
+    let negative = bytes.get(i) == Some(&b'-');
+    i += usize::from(matches!(bytes.get(i), Some(b'-' | b'+')));
+    let (value, digits) = leading_digits(&bytes[i..])?;
     Some((if negative { -value } else { value }, i + digits))
+}
+
+/// Parses the leading ASCII digits of `bytes` as a saturating base-10 integer, returning it and
+/// the number of digits, or `None` without digits.
+pub fn leading_digits(bytes: &[u8]) -> Option<(i64, usize)> {
+    let digits = bytes.iter().take_while(|b| b.is_ascii_digit()).count();
+    let value = bytes[..digits].iter().fold(0_i64, |value, &b| {
+        value.saturating_mul(10).saturating_add(i64::from(b - b'0'))
+    });
+    (digits > 0).then_some((value, digits))
 }
 
 fn parse_integer(bytes: &[u8]) -> Option<i64> {
@@ -269,31 +249,28 @@ fn parse_sam(line: &[u8]) -> Result<Interval<'_>, String> {
 
 fn svlen_applies(allele: &[u8]) -> bool {
     allele.len() >= 5
-        && allele[0] == b'<'
         && matches!(allele[4], b'>' | b':')
         && matches!(&allele[..4], b"<CNV" | b"<DEL" | b"<DUP" | b"<INV")
         && allele[allele.len() - 1] == b'>'
 }
 
+/// Returns what follows the first `key` at the start of `info` or after a `;`.
 fn info_value<'a>(info: &'a [u8], key: &[u8]) -> Option<&'a [u8]> {
-    let at = memmem::find(info, key)?;
-    if at == 0 {
-        return Some(&info[key.len()..]);
-    }
-    let mut delimited = Vec::with_capacity(key.len() + 1);
-    delimited.push(b';');
-    delimited.extend_from_slice(key);
-    memmem::find(info, &delimited).map(|at| &info[at + delimited.len()..])
+    memmem::find_iter(info, key)
+        .find(|&at| at == 0 || info[at - 1] == b';')
+        .map(|at| &info[at + key.len()..])
 }
 
-#[allow(clippy::too_many_lines)]
+/// Returns the ALT alleles htslib considers, at most 65535.
+fn alleles(alts: &[u8]) -> impl Iterator<Item = &[u8]> {
+    alts.split(|&b| b == b',').take(65535)
+}
+
 fn parse_vcf(line: &[u8]) -> Result<Interval<'_>, String> {
     let mut name = None;
     let mut beg = -1_i64;
     let mut end = -1_i64;
-    let mut allele_count = 0_usize;
-    let mut svlen_alleles: Vec<bool> = Vec::new();
-    let mut uses_svlen = false;
+    let mut alts = None;
     let mut uses_len = false;
     let mut len_index: Option<usize> = None;
     let (mut reflen, mut svlen, mut fmtlen) = (0_i64, 0_i64, 0_i64);
@@ -305,24 +282,11 @@ fn parse_vcf(line: &[u8]) -> Result<Interval<'_>, String> {
                 if !field.is_empty() {
                     end = beg.saturating_add(field.len() as i64);
                 }
-                allele_count += 1;
-                svlen_alleles.push(false);
                 reflen = field.len() as i64;
             }
             5 => {
-                for allele in field.split(|&b| b == b',') {
-                    if allele_count >= 65536 {
-                        break;
-                    }
-                    allele_count += 1;
-                    let applies = svlen_applies(allele);
-                    svlen_alleles.push(applies);
-                    if applies {
-                        uses_svlen = true;
-                    } else if allele == b"<*>" || allele == b"<NON_REF>" {
-                        uses_len = true;
-                    }
-                }
+                uses_len = alleles(field).any(|allele| allele == b"<*>" || allele == b"<NON_REF>");
+                alts = Some(field);
             }
             8 => {
                 if let Some(value) = info_value(field, b"END=")
@@ -334,20 +298,17 @@ fn parse_vcf(line: &[u8]) -> Result<Interval<'_>, String> {
                     }
                 }
                 let mut next = info_value(field, b"SVLEN=");
-                let mut allele = 1;
-                while let Some(value) = next {
-                    if allele >= allele_count {
+                for allele in alts.into_iter().flat_map(alleles) {
+                    let Some(value) = next else {
                         break;
-                    }
-                    let length =
-                        if uses_svlen && svlen_alleles.get(allele).copied().unwrap_or(false) {
-                            integer_or_zero(value).saturating_abs()
-                        } else {
-                            1
-                        };
+                    };
+                    let length = if svlen_applies(allele) {
+                        integer_or_zero(value).saturating_abs()
+                    } else {
+                        1
+                    };
                     svlen = svlen.max(length);
                     next = memchr(b',', value).map(|comma| &value[comma + 1..]);
-                    allele += 1;
                 }
                 if !uses_len {
                     break;

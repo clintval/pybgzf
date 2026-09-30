@@ -5,6 +5,7 @@ import io
 import os
 import stat
 from enum import Enum
+from typing import Any
 from typing import Protocol
 
 from typing_extensions import Buffer
@@ -19,6 +20,11 @@ from pybgzf._columns import columns_to_tuple
 
 class IndexFormat(Enum):
     """The kind of index to build while writing."""
+
+    @override
+    def __reduce_ex__(self, proto: object) -> tuple[Any, ...]:
+        """Pickle by name, since the value is an extension object."""
+        return getattr, (type(self), self.name)
 
     TBI = _pybgzf.IndexKind.TBI
     """A tabix index, for references up to 2^29 bases."""
@@ -178,8 +184,6 @@ class BgzfWriter(io.RawIOBase):
             ValueError: If the file is closed, or a line cannot be indexed, naming the line.
                 After an indexing error, further writes raise.
         """
-        if self.closed:
-            raise ValueError("I/O operation on closed file.")
         return self._inner.write(data)
 
     @override
@@ -195,8 +199,6 @@ class BgzfWriter(io.RawIOBase):
     @override
     def tell(self) -> int:
         """Return the virtual offset of the next byte, waiting for pending blocks to be written."""
-        if self.closed:
-            raise ValueError("I/O operation on closed file.")
         return self._inner.tell()
 
     @override

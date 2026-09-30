@@ -2,7 +2,7 @@
 
 use std::collections::VecDeque;
 use std::fs::File;
-use std::io::{self, BufReader, BufWriter, Read, Seek, SeekFrom, Write};
+use std::io::{self, BufRead, BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::num::NonZero;
 use std::path::{Path, PathBuf};
 use std::thread;
@@ -10,17 +10,15 @@ use std::thread;
 use pyo3::buffer::PyBuffer;
 use pyo3::exceptions::{PyOSError, PyUserWarning, PyValueError};
 use pyo3::prelude::*;
-use pyo3::types::{PyBytes, PyString, PyType};
+use pyo3::types::{PyBytes, PyString};
 
+use crate::Error;
 use crate::columns::{Columns, Kind};
 use crate::reader::{
-    AnyIndex, BgzfReader, IndexedReader as CoreIndexedReader, Query, QueryError,
-    ends_with_eof_marker,
+    AnyIndex, BgzfReader, IndexedReader as CoreIndexedReader, Query, ends_with_eof_marker,
 };
 use crate::sniff;
-use crate::writer::{
-    Error, IndexFormat, IndexOptions, Writer as CoreWriter, check_options, csi_format,
-};
+use crate::writer::{IndexFormat, IndexOptions, Writer as CoreWriter, check_options, csi_format};
 
 const FILE_BUFFER: usize = 256 * 1024;
 
@@ -40,82 +38,21 @@ fn warn_truncated(py: Python<'_>, path: Option<&Path>) -> PyResult<()> {
     PyErr::warn(py, &py.get_type::<TruncatedWarning>(), &message, 1)
 }
 
-type ColumnsTuple = (i64, i64, Option<i64>, bool, String, i64, LineKind);
-
-/// The value of each `pybgzf.LineFormat` member.
-#[pyclass(module = "pybgzf._pybgzf", eq, frozen, hash, from_py_object)]
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
-enum LineKind {
-    #[pyo3(name = "GENERIC")]
-    Generic,
-    #[pyo3(name = "SAM")]
-    Sam,
-    #[pyo3(name = "VCF")]
-    Vcf,
-}
-
-#[pymethods]
-impl LineKind {
-    fn __reduce__<'py>(slf: &Bound<'py, Self>) -> PyResult<Reduced<'py>> {
-        let name = match *slf.get() {
-            LineKind::Generic => "GENERIC",
-            LineKind::Sam => "SAM",
-            LineKind::Vcf => "VCF",
-        };
-        reduce_to_attribute(slf.as_any(), name)
-    }
-}
-
-impl From<LineKind> for Kind {
-    fn from(kind: LineKind) -> Self {
-        match kind {
-            LineKind::Generic => Kind::Generic,
-            LineKind::Sam => Kind::Sam,
-            LineKind::Vcf => Kind::Vcf,
-        }
-    }
-}
-
-impl From<Kind> for LineKind {
-    fn from(kind: Kind) -> Self {
-        match kind {
-            Kind::Generic => LineKind::Generic,
-            Kind::Sam => LineKind::Sam,
-            Kind::Vcf => LineKind::Vcf,
-        }
-    }
-}
-
-type Reduced<'py> = (Bound<'py, PyAny>, (Bound<'py, PyType>, &'static str));
-
-/// Pickles an enum member as its class and name, which unpickling looks up with `getattr`.
-fn reduce_to_attribute<'py>(
-    member: &Bound<'py, PyAny>,
-    name: &'static str,
-) -> PyResult<Reduced<'py>> {
-    let getattr = PyModule::import(member.py(), "builtins")?.getattr("getattr")?;
-    Ok((getattr, (member.get_type(), name)))
-}
+type ColumnsTuple = (i64, i64, Option<i64>, bool, String, i64, Kind);
 
 /// The value of each `pybgzf.IndexFormat` member.
-#[pyclass(module = "pybgzf._pybgzf", eq, frozen, hash, from_py_object)]
+#[pyclass(
+    module = "pybgzf._pybgzf",
+    rename_all = "UPPERCASE",
+    eq,
+    frozen,
+    hash,
+    from_py_object
+)]
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 enum IndexKind {
-    #[pyo3(name = "TBI")]
-    Tabix,
-    #[pyo3(name = "CSI")]
+    Tbi,
     Csi,
-}
-
-#[pymethods]
-impl IndexKind {
-    fn __reduce__<'py>(slf: &Bound<'py, Self>) -> PyResult<Reduced<'py>> {
-        let name = match *slf.get() {
-            IndexKind::Tabix => "TBI",
-            IndexKind::Csi => "CSI",
-        };
-        reduce_to_attribute(slf.as_any(), name)
-    }
 }
 
 enum Sink {
@@ -190,7 +127,6 @@ fn columns_from_tuple(columns: ColumnsTuple) -> PyResult<Columns> {
             ));
         }
     };
-    let kind = Kind::from(kind);
     let columns = Columns {
         refname,
         start,
@@ -212,7 +148,7 @@ fn columns_to_tuple(columns: &Columns) -> ColumnsTuple {
         columns.zero_based,
         char::from(columns.meta_char).to_string(),
         columns.skip_lines as i64,
-        LineKind::from(columns.kind),
+        columns.kind,
     )
 }
 
@@ -241,28 +177,12 @@ impl Writer {
     ) -> PyResult<Self> {
         let columns = columns.map(columns_from_tuple).transpose()?;
         let infer = infer || infer_bed;
-        let options = match index {
-            None => {
-                if index_path.is_some() {
-                    return Err(PyValueError::new_err(
-                        "index_path is only used when index is set",
-                    ));
-                }
-                None
-            }
-            Some(kind) => {
+        let options = match (index, index_path) {
+            (Some(kind), Some(path)) => {
                 let format = match kind {
-                    IndexKind::Tabix => IndexFormat::Tabix,
+                    IndexKind::Tbi => IndexFormat::Tabix,
                     IndexKind::Csi => csi_format(csi_min_shift, csi_depth).map_err(to_python)?,
                 };
-                if columns.is_none() && !infer {
-                    return Err(PyValueError::new_err(
-                        "columns is required when index is set",
-                    ));
-                }
-                let path = index_path.ok_or_else(|| {
-                    PyValueError::new_err("index_path is required when index is set")
-                })?;
                 Some(IndexOptions {
                     format,
                     path,
@@ -270,6 +190,7 @@ impl Writer {
                     bed_only: infer_bed,
                 })
             }
+            _ => None,
         };
         check_options(level, threads, options.as_ref()).map_err(to_python)?;
         let sink = if dest.is_instance_of::<PyString>() {
@@ -279,8 +200,6 @@ impl Writer {
         } else {
             Sink::Python(dest.clone().unbind())
         };
-        let level = u8::try_from(level).expect("the level was checked");
-        let threads = usize::try_from(threads).expect("threads were checked");
         let inner = CoreWriter::new(sink, level, threads, options).map_err(to_python)?;
         Ok(Self { inner })
     }
@@ -458,36 +377,53 @@ fn path_error(error: io::Error, path: Option<&Path>) -> PyErr {
     }
 }
 
-fn closed_error() -> PyErr {
-    PyValueError::new_err("I/O operation on closed file.")
+/// A reader until it is closed, which stops its threads without the GIL, in the background when
+/// `background` is set, such as for a pipe whose writer is idle, so that closing never waits on
+/// a read that may not return.
+struct Open<T: Send + 'static> {
+    inner: Option<T>,
+    background: bool,
 }
 
-fn drop_detached<T: Send>(py: Python<'_>, value: T) {
-    py.detach(move || drop(value));
+impl<T: Send + 'static> Open<T> {
+    fn get(&mut self) -> PyResult<&mut T> {
+        self.inner
+            .as_mut()
+            .ok_or_else(|| PyValueError::new_err("I/O operation on closed file."))
+    }
+
+    fn close(&mut self, py: Python<'_>) {
+        if let Some(inner) = self.inner.take() {
+            let background = self.background;
+            py.detach(move || {
+                if background {
+                    drop(thread::Builder::new().spawn(move || drop(inner)));
+                } else {
+                    drop(inner);
+                }
+            });
+        }
+    }
 }
 
-/// Stops a reader's threads, in the background when its source may block, such as a pipe whose
-/// writer is idle, so that closing never waits on a read that may not return.
-fn release(py: Python<'_>, reader: BgzfReader<Source>, may_block: bool) {
-    if may_block && reader.reads_ahead() {
-        py.detach(|| drop(thread::Builder::new().spawn(move || drop(reader))));
-    } else {
-        drop_detached(py, reader);
+impl<T: Send + 'static> Drop for Open<T> {
+    fn drop(&mut self) {
+        if self.inner.is_some() {
+            Python::attach(|py| self.close(py));
+        }
     }
 }
 
 /// The Rust half of `pybgzf.BgzfReader`.
 #[pyclass(module = "pybgzf._pybgzf")]
 struct Reader {
-    inner: Option<BgzfReader<Source>>,
+    inner: Open<BgzfReader<Source>>,
     path: Option<PathBuf>,
-    may_block: bool,
 }
 
 impl Reader {
     fn inner(&mut self) -> PyResult<(&mut BgzfReader<Source>, Option<&Path>)> {
-        let inner = self.inner.as_mut().ok_or_else(closed_error)?;
-        Ok((inner, self.path.as_deref()))
+        Ok((self.inner.get()?, self.path.as_deref()))
     }
 }
 
@@ -514,24 +450,23 @@ impl Reader {
         let inner = py
             .detach(|| BgzfReader::new(source, threads))
             .map_err(|e| path_error(e, path.as_deref()))?;
-        Ok(Self {
+        let inner = Open {
             inner: Some(inner),
-            path,
-            may_block,
-        })
+            background: may_block && threads.get() > 1,
+        };
+        Ok(Self { inner, path })
     }
 
     /// Reads up to `size` bytes, fewer only at the end of the stream.
     fn read<'py>(&mut self, py: Python<'py>, size: usize) -> PyResult<Bound<'py, PyBytes>> {
         let (inner, path) = self.inner()?;
-        let mut buf = vec![0_u8; size];
-        let n = py
-            .detach(|| inner.read_full(&mut buf))
+        let mut buf = Vec::with_capacity(size);
+        py.detach(|| (&mut *inner).take(size as u64).read_to_end(&mut buf))
             .map_err(|e| path_error(e, path))?;
         if inner.take_missing_eof_marker() {
             warn_truncated(py, path)?;
         }
-        Ok(PyBytes::new(py, &buf[..n]))
+        Ok(PyBytes::new(py, &buf))
     }
 
     /// Reads everything that is left.
@@ -546,11 +481,12 @@ impl Reader {
         Ok(PyBytes::new(py, &buf))
     }
 
-    /// Reads through the next newline.
-    fn readline<'py>(&mut self, py: Python<'py>) -> PyResult<Bound<'py, PyBytes>> {
+    /// Reads through the next newline, or at most `size` bytes when `size` is not negative.
+    fn readline<'py>(&mut self, py: Python<'py>, size: i64) -> PyResult<Bound<'py, PyBytes>> {
         let (inner, path) = self.inner()?;
+        let limit = u64::try_from(size).unwrap_or(u64::MAX);
         let mut line = Vec::new();
-        py.detach(|| inner.read_line(&mut line))
+        py.detach(|| (&mut *inner).take(limit).read_until(b'\n', &mut line))
             .map_err(|e| path_error(e, path))?;
         if inner.take_missing_eof_marker() {
             warn_truncated(py, path)?;
@@ -576,36 +512,20 @@ impl Reader {
 
     /// Stops any worker threads.
     fn close(&mut self, py: Python<'_>) {
-        if let Some(inner) = self.inner.take() {
-            release(py, inner, self.may_block);
-        }
+        self.inner.close(py);
     }
 
     #[getter]
     fn closed(&self) -> bool {
-        self.inner.is_none()
-    }
-}
-
-impl Drop for Reader {
-    fn drop(&mut self) {
-        if let Some(inner) = self.inner.take() {
-            Python::attach(|py| release(py, inner, self.may_block));
-        }
+        self.inner.inner.is_none()
     }
 }
 
 /// The Rust half of `pybgzf.IndexedReader`.
 #[pyclass(module = "pybgzf._pybgzf")]
 struct IndexedReader {
-    inner: Option<CoreIndexedReader<BufReader<File>>>,
+    inner: Open<CoreIndexedReader<BufReader<File>>>,
     path: PathBuf,
-}
-
-impl IndexedReader {
-    fn inner(&mut self) -> PyResult<&mut CoreIndexedReader<BufReader<File>>> {
-        self.inner.as_mut().ok_or_else(closed_error)
-    }
 }
 
 #[pymethods]
@@ -615,57 +535,50 @@ impl IndexedReader {
     #[allow(clippy::needless_pass_by_value)]
     fn new(py: Python<'_>, path: PathBuf, index_path: PathBuf, threads: i64) -> PyResult<Self> {
         let threads = self::threads(threads)?;
-        let index =
-            py.detach(|| AnyIndex::read(&index_path))
-                .map_err(|error| match error.kind() {
-                    io::ErrorKind::InvalidData => {
-                        PyValueError::new_err(format!("{}: {error}", index_path.display()))
-                    }
-                    _ => path_error(error, Some(&index_path)),
-                })?;
+        let error = |error: io::Error, read: &Path| match error.kind() {
+            io::ErrorKind::InvalidData => {
+                PyValueError::new_err(format!("{}: {error}", index_path.display()))
+            }
+            _ => path_error(error, Some(read)),
+        };
+        let index = py
+            .detach(|| AnyIndex::read(&index_path))
+            .map_err(|e| error(e, &index_path))?;
         let inner = py
             .detach(|| CoreIndexedReader::new(BgzfReader::from_path(&path, threads)?, index))
-            .map_err(|error| match error.kind() {
-                io::ErrorKind::InvalidData => {
-                    PyValueError::new_err(format!("{}: {error}", index_path.display()))
-                }
-                _ => path_error(error, Some(&path)),
-            })?;
+            .map_err(|e| error(e, &path))?;
         if !py
             .detach(|| ends_with_eof_marker(&path))
             .map_err(|error| path_error(error, Some(&path)))?
         {
             warn_truncated(py, Some(&path))?;
         }
-        Ok(Self {
+        let inner = Open {
             inner: Some(inner),
-            path,
-        })
+            background: false,
+        };
+        Ok(Self { inner, path })
     }
 
     /// Starts a query for lines overlapping the 0-based, half-open `[start, end)` on `refname`.
     fn query(slf: Bound<'_, Self>, refname: &str, start: i64, end: i64) -> PyResult<QueryIterator> {
-        if start < 0 || end < start {
-            return Err(PyValueError::new_err(format!(
-                "start must be at least 0 and end at least start, not {start} and {end}"
-            )));
-        }
         let query = slf
             .borrow_mut()
-            .inner()?
+            .inner
+            .get()?
             .query(refname.as_bytes(), start, end)
             .map_err(io_to_python)?;
         Ok(QueryIterator {
             reader: slf.unbind(),
             query,
             lines: VecDeque::new(),
-            done: false,
         })
     }
 
     #[getter]
     fn refnames(&mut self) -> PyResult<Vec<String>> {
-        self.inner()?
+        self.inner
+            .get()?
             .names()
             .map(|name| {
                 String::from_utf8(name.to_vec()).map_err(|_| {
@@ -680,27 +593,17 @@ impl IndexedReader {
 
     #[getter]
     fn columns(&mut self) -> PyResult<ColumnsTuple> {
-        Ok(columns_to_tuple(self.inner()?.columns()))
+        Ok(columns_to_tuple(self.inner.get()?.columns()))
     }
 
     /// Stops any worker threads.
     fn close(&mut self, py: Python<'_>) {
-        if let Some(inner) = self.inner.take() {
-            drop_detached(py, inner);
-        }
+        self.inner.close(py);
     }
 
     #[getter]
     fn closed(&self) -> bool {
-        self.inner.is_none()
-    }
-}
-
-impl Drop for IndexedReader {
-    fn drop(&mut self) {
-        if let Some(inner) = self.inner.take() {
-            Python::attach(|py| drop_detached(py, inner));
-        }
+        self.inner.inner.is_none()
     }
 }
 
@@ -712,7 +615,6 @@ struct QueryIterator {
     reader: Py<IndexedReader>,
     query: Query,
     lines: VecDeque<String>,
-    done: bool,
 }
 
 #[pymethods]
@@ -726,20 +628,18 @@ impl QueryIterator {
             if let Some(line) = self.lines.pop_front() {
                 return Ok(Some(PyString::new(py, &line)));
             }
-            if self.done {
+            if self.query.done {
                 return Ok(None);
             }
             let mut reader = self.reader.bind(py).borrow_mut();
-            let inner = reader.inner()?;
+            let inner = reader.inner.get()?;
             let query = &mut self.query;
             let mut batch = Vec::new();
-            let more = py
-                .detach(|| inner.next_lines(query, &mut batch, QUERY_BATCH))
+            py.detach(|| inner.next_lines(query, &mut batch, QUERY_BATCH))
                 .map_err(|error| match error {
-                    QueryError::Io(error) => path_error(error, Some(&reader.path)),
-                    QueryError::Invalid(message) => PyValueError::new_err(message),
+                    Error::Io(error) => path_error(error, Some(&reader.path)),
+                    Error::Invalid(message) => PyValueError::new_err(message),
                 })?;
-            self.done = !more;
             self.lines.extend(batch);
         }
     }
@@ -753,7 +653,7 @@ fn _pybgzf(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<QueryIterator>()?;
     module.add_class::<Sniffer>()?;
     module.add_class::<IndexKind>()?;
-    module.add_class::<LineKind>()?;
+    module.add_class::<Kind>()?;
     module.add_function(wrap_pyfunction!(validate_columns, module)?)?;
     module.add("BLOCK_SIZE", crate::block::BLOCK_SIZE)?;
     module.add(

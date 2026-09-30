@@ -75,13 +75,6 @@ def test_bed(tmp_path: Path, index: IndexFormat, threads: int) -> None:
     assert_identical(ours, htslib_index(path, index, "-p", "bed"))
 
 
-def test_decompressed_tabix_index_is_byte_identical(tmp_path: Path) -> None:
-    path = tmp_path / "a.bed.gz"
-    ours = write(path, bed_text(), TBI, Columns.BED)
-    theirs = htslib_index(path, TBI, "-p", "bed")
-    assert gzip.decompress(ours.read_bytes()) == gzip.decompress(theirs.read_bytes())
-
-
 def test_csi_min_shift(tmp_path: Path) -> None:
     path = tmp_path / "a.bed.gz"
     ours = write(path, bed_text(), CSI, Columns.BED, csi_min_shift=12)

@@ -6,8 +6,11 @@ from dataclasses import dataclass
 from enum import Enum
 from enum import auto
 from pathlib import Path
+from typing import Any
 from typing import ClassVar
 from typing import Final
+
+from typing_extensions import override
 
 from pybgzf import _pybgzf
 
@@ -18,6 +21,11 @@ _COMPRESSION_SUFFIXES: Final = (".gz", ".bgz", ".bgzf")
 
 class LineFormat(Enum):
     """How a line's end is found, which tabix also records as the file format."""
+
+    @override
+    def __reduce_ex__(self, proto: object) -> tuple[Any, ...]:
+        """Pickle by name, since the value is an extension object."""
+        return getattr, (type(self), self.name)
 
     GENERIC = _pybgzf.LineKind.GENERIC
     """The end is read from the end column, or the line covers one base if there is none."""
@@ -84,19 +92,11 @@ class Columns:
             ValueError: If the file name has none of these suffixes.
         """
         name = Path(path).name.lower()
-        for suffix in _COMPRESSION_SUFFIXES:
-            if name.endswith(suffix):
-                name = name.removesuffix(suffix)
-                break
-        extension = Path(name).suffix
-        if extension == ".bed":
-            return cls.BED
-        if extension in (".gff", ".gff3", ".gtf"):
-            return cls.GFF
-        if extension == ".vcf":
-            return cls.VCF
-        if extension == ".sam":
-            return cls.SAM
+        name = next((name.removesuffix(s) for s in _COMPRESSION_SUFFIXES if name.endswith(s)), name)
+        presets = {".bed": cls.BED, ".gff": cls.GFF, ".gff3": cls.GFF, ".gtf": cls.GFF}
+        presets |= {".sam": cls.SAM, ".vcf": cls.VCF}
+        if (preset := presets.get(Path(name).suffix)) is not None:
+            return preset
         raise ValueError(
             f"cannot infer columns from the file name {os.fspath(path)!r}; pass columns explicitly"
         )
@@ -129,21 +129,13 @@ class Columns:
 
 def columns_to_tuple(columns: Columns) -> ColumnsTuple:
     """Flatten columns for the extension module."""
-    return (
-        columns.refname,
-        columns.start,
-        columns.end,
-        columns.zero_based,
-        columns.meta_char,
-        columns.skip_lines,
-        columns.format.value,
-    )
+    c = columns
+    return (c.refname, c.start, c.end, c.zero_based, c.meta_char, c.skip_lines, c.format.value)
 
 
 def columns_from_tuple(values: ColumnsTuple) -> Columns:
     """Rebuild columns from the extension module."""
-    refname, start, end, zero_based, meta_char, skip_lines, line_format = values
-    return Columns(refname, start, end, zero_based, meta_char, skip_lines, LineFormat(line_format))
+    return Columns(*values[:-1], LineFormat(values[-1]))
 
 
 Columns.BED = Columns(refname=1, start=2, end=3, zero_based=True, meta_char="#")
