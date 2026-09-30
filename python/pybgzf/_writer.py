@@ -219,7 +219,7 @@ class BgzfWriter(io.RawIOBase):
             super().close()
 
 
-def open_writer(
+def writer(
     dest: str | os.PathLike[str] | WritableBinary,
     *,
     encoding: str | None = None,
@@ -242,7 +242,7 @@ def open_writer(
     With an index, text is passed on at every write, so a line that cannot be indexed raises there.
     """
     encoding = codecs.lookup("utf-8" if encoding is None else encoding).name
-    writer = BgzfWriter(
+    raw = BgzfWriter(
         dest,
         level=level,
         threads=threads,
@@ -254,12 +254,12 @@ def open_writer(
     )
     try:
         return io.TextIOWrapper(
-            writer,
+            raw,
             encoding=encoding,
             errors=errors,
             newline="\n" if newline is None else newline,
             write_through=index is not None,
         )
     except BaseException:
-        writer.close()
+        raw.close()
         raise

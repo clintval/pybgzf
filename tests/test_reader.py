@@ -34,7 +34,7 @@ def data_dir(tmp_path_factory: pytest.TempPathFactory, lines: list[str]) -> Path
     for index in (IndexFormat.TBI, IndexFormat.CSI):
         path = directory / index.name.lower() / "features.bed.gz"
         path.parent.mkdir()
-        with pybgzf.open_writer(path, threads=3, index=index, columns=Columns.BED) as handle:
+        with pybgzf.writer(path, threads=3, index=index, columns=Columns.BED) as handle:
             handle.write("#chrom\tstart\tend\tname\tscore\n")
             handle.writelines(lines)
     return directory
@@ -51,13 +51,13 @@ def test_round_trips_with_every_thread_count(data_dir: Path, lines: list[str]) -
     for threads in (1, 2, 5):
         with BgzfReader(path, threads=threads) as reader:
             assert reader.readall() == expected
-        with pybgzf.open_reader(path, threads=threads) as handle:
+        with pybgzf.reader(path, threads=threads) as handle:
             assert handle.read() == expected.decode()
 
 
 def test_matches_stdlib_gzip_line_by_line(data_dir: Path) -> None:
     path = bed_path(data_dir, IndexFormat.CSI)
-    with gzip.open(path, "rt") as expected, pybgzf.open_reader(path, threads=4) as actual:
+    with gzip.open(path, "rt") as expected, pybgzf.reader(path, threads=4) as actual:
         assert list(actual) == list(expected)
 
 
@@ -254,7 +254,7 @@ def test_queries_follow_the_columns_in_the_index(tmp_path: Path) -> None:
         "#comment\n"
         "chr1\tsrc\tgene\t401\t500\t.\t+\t.\tID=c\n"
     )
-    with pybgzf.open_writer(path, index=IndexFormat.CSI, columns=pybgzf.INFER) as handle:
+    with pybgzf.writer(path, index=IndexFormat.CSI, columns=pybgzf.INFER) as handle:
         handle.write(text)
     with IndexedReader(path) as reader:
         assert reader.columns == Columns.GFF
@@ -283,7 +283,7 @@ def test_reads_files_written_by_bgzip(tmp_path: Path, lines: list[str]) -> None:
 
     subprocess.run(["bgzip", "-@", "2", str(path)], check=True)
     subprocess.run(["tabix", "-p", "bed", f"{path}.gz"], check=True)
-    with pybgzf.open_reader(f"{path}.gz", threads=2) as handle:
+    with pybgzf.reader(f"{path}.gz", threads=2) as handle:
         assert handle.read() == "".join(lines)
     with IndexedReader(f"{path}.gz") as reader:
         assert list(reader.query("chr2", 1_000, 90_000)) == overlapping(
@@ -321,7 +321,7 @@ def test_corrupt_input_raises(
     with pytest.raises(OSError), BgzfReader(source(), threads=threads) as reader:
         while reader.readline():
             pass
-    with pytest.raises(OSError), pybgzf.open_reader(source(), threads=threads) as handle:
+    with pytest.raises(OSError), pybgzf.reader(source(), threads=threads) as handle:
         handle.read()
 
 
@@ -542,7 +542,7 @@ def test_query_bounds_beyond_64_bits(data_dir: Path, lines: list[str]) -> None:
 
 def test_open_reader_checks_the_encoding_first(data_dir: Path) -> None:
     with pytest.raises(LookupError):
-        pybgzf.open_reader(bed_path(data_dir, IndexFormat.TBI), threads=2, encoding="no-such-codec")
+        pybgzf.reader(bed_path(data_dir, IndexFormat.TBI), threads=2, encoding="no-such-codec")
 
 
 @pytest.mark.parametrize("threads", [1, 3])

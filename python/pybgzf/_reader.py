@@ -136,7 +136,7 @@ class BgzfReader(io.RawIOBase):
             raise ValueError("I/O operation on closed file.")
 
 
-def open_reader(
+def reader(
     src: str | os.PathLike[str] | ReadableBinary,
     *,
     threads: int = 1,

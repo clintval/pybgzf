@@ -33,7 +33,7 @@ Write sorted BED lines as text and the index appears next to the file on close:
 >>> directory = Path(mkdtemp())
 >>> path = directory / "features.bed.gz"
 >>>
->>> with pybgzf.open_writer(path, index=IndexFormat.TBI, columns=Columns.BED) as handle:
+>>> with pybgzf.writer(path, index=IndexFormat.TBI, columns=Columns.BED) as handle:
 ...     _ = handle.write("chr1\t100\t200\tgene-a\n")
 ...     _ = handle.write("chr1\t150\t300\tgene-b\n")
 ...     _ = handle.write("chr2\t10\t20\tgene-c\n")
@@ -61,7 +61,7 @@ True
 Read the BED file back on several threads, or query a region with 0-based, half-open coordinates:
 
 ```python
->>> with pybgzf.open_reader(path, threads=4) as handle:
+>>> with pybgzf.reader(path, threads=4) as handle:
 ...     handle.readline()
 'chr1\t100\t200\tgene-a\n'
 
@@ -85,8 +85,8 @@ Writing 200 MB of BED lines at level 6, then reading them back, on an Apple M3 M
 | `bgzip -@4` then `tabix`             |    1.31 |   153 |
 | `bgzip -@16` then `tabix`            |    0.90 |   222 |
 | lines from `gzip.open` (stdlib)      |    0.66 |   303 |
-| lines from `open_reader`, 1 thread   |    0.44 |   456 |
-| lines from `open_reader`, 4 threads  |    0.30 |   671 |
+| lines from `reader`, 1 thread   |    0.44 |   456 |
+| lines from `reader`, 4 threads  |    0.30 |   671 |
 | bytes from `BgzfReader`, 16 threads  |    0.03 |  7608 |
 | `bgzip -d -@16`                      |    0.03 |  7652 |
 

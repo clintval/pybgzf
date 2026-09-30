@@ -117,7 +117,7 @@ def read_benchmarks(data: bytes, out: Path, cores: int) -> None:
     for threads in sorted({1, 2, 4, 8, cores}):
 
         def pybgzf_lines(threads: int = threads) -> None:
-            with pybgzf.open_reader(path, threads=threads) as handle:
+            with pybgzf.reader(path, threads=threads) as handle:
                 for _ in handle:
                     pass
 
