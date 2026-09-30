@@ -9,6 +9,18 @@ from pybgzf._columns import ColumnsTuple
 from pybgzf._reader import ReadableBinary
 from pybgzf._writer import WritableBinary
 
+__all__ = [
+    "BLOCK_SIZE",
+    "IndexKind",
+    "IndexedReader",
+    "LineKind",
+    "QueryIterator",
+    "Reader",
+    "Sniffer",
+    "Writer",
+    "validate_columns",
+]
+
 BLOCK_SIZE: int
 
 @final

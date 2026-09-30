@@ -161,8 +161,8 @@ def open_reader(
 class IndexedReader:
     """A BGZF file and its tabix or CSI index, for reading the lines in a region.
 
-    Lines are found with the columns, header character, and skipped lines recorded in the index,
-    and a query returns what `tabix path ref:start+1-end` prints, in the same order.
+    Lines are parsed with the columns and header character recorded in the index, and a query
+    returns what `tabix path ref:start+1-end` prints, in the same order.
 
     Args:
         path: The BGZF file.
