@@ -71,25 +71,6 @@ Read the BED file back on several threads, or query a region with 0-based, half-
 
 ```
 
-## Benchmarks
-
-Writing 200 MB of BED lines at level 6, then reading them back, on an Apple M3 Max with `benchmarks/benchmark.py`:
-
-| Command                              | Seconds |  MB/s |
-|--------------------------------------|--------:|------:|
-| `gzip` (stdlib)                      |    4.80 |    42 |
-| pybgzf, 1 thread, `.tbi`             |    1.84 |   109 |
-| pybgzf, 4 threads, `.tbi`            |    0.43 |   466 |
-| pybgzf, 16 threads, `.tbi`           |    0.31 |   641 |
-| `bgzip -@1` then `tabix`             |    3.01 |    66 |
-| `bgzip -@4` then `tabix`             |    1.31 |   153 |
-| `bgzip -@16` then `tabix`            |    0.90 |   222 |
-| lines from `gzip.open` (stdlib)      |    0.66 |   303 |
-| lines from `reader`, 1 thread   |    0.44 |   456 |
-| lines from `reader`, 4 threads  |    0.30 |   671 |
-| bytes from `BgzfReader`, 16 threads  |    0.03 |  7608 |
-| `bgzip -d -@16`                      |    0.03 |  7652 |
-
 ## Development and Testing
 
 See the [contributing guide](https://github.com/clintval/pybgzf/blob/main/CONTRIBUTING.md) for more information.
