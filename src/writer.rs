@@ -437,9 +437,7 @@ impl<W: Write> Writer<W> {
     /// indexing error.
     fn check(&self, indexing: bool) -> Result<()> {
         if self.finished {
-            return Err(Error::Io(io::Error::other(
-                "I/O operation on a closed writer",
-            )));
+            return Err(Error::Invalid("I/O operation on closed file.".into()));
         }
         self.check_io()?;
         if let Some(message) = self

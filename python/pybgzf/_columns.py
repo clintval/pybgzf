@@ -92,19 +92,11 @@ class Columns:
             ValueError: If the file name has none of these suffixes.
         """
         name = Path(path).name.lower()
-        for suffix in _COMPRESSION_SUFFIXES:
-            if name.endswith(suffix):
-                name = name.removesuffix(suffix)
-                break
-        extension = Path(name).suffix
-        if extension == ".bed":
-            return cls.BED
-        if extension in (".gff", ".gff3", ".gtf"):
-            return cls.GFF
-        if extension == ".vcf":
-            return cls.VCF
-        if extension == ".sam":
-            return cls.SAM
+        name = next((name.removesuffix(s) for s in _COMPRESSION_SUFFIXES if name.endswith(s)), name)
+        presets = {".bed": cls.BED, ".gff": cls.GFF, ".gff3": cls.GFF, ".gtf": cls.GFF}
+        presets |= {".sam": cls.SAM, ".vcf": cls.VCF}
+        if (preset := presets.get(Path(name).suffix)) is not None:
+            return preset
         raise ValueError(
             f"cannot infer columns from the file name {os.fspath(path)!r}; pass columns explicitly"
         )
@@ -137,21 +129,13 @@ class Columns:
 
 def columns_to_tuple(columns: Columns) -> ColumnsTuple:
     """Flatten columns for the extension module."""
-    return (
-        columns.refname,
-        columns.start,
-        columns.end,
-        columns.zero_based,
-        columns.meta_char,
-        columns.skip_lines,
-        columns.format.value,
-    )
+    c = columns
+    return (c.refname, c.start, c.end, c.zero_based, c.meta_char, c.skip_lines, c.format.value)
 
 
 def columns_from_tuple(values: ColumnsTuple) -> Columns:
     """Rebuild columns from the extension module."""
-    refname, start, end, zero_based, meta_char, skip_lines, line_format = values
-    return Columns(refname, start, end, zero_based, meta_char, skip_lines, LineFormat(line_format))
+    return Columns(*values[:-1], LineFormat(values[-1]))
 
 
 Columns.BED = Columns(refname=1, start=2, end=3, zero_based=True, meta_char="#")
