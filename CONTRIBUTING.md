@@ -4,7 +4,7 @@
 
 Install [uv](https://docs.astral.sh/uv/) and a [Rust toolchain](https://rustup.rs), then build the extension and install the development environment with:
 
-```bash
+```console
 uv sync --locked
 ```
 
@@ -14,7 +14,7 @@ The extension is built with [maturin](https://www.maturin.rs), and `uv sync` reb
 
 To ensure all tests pass, run:
 
-```bash
+```console
 uv run poe check-tests
 cargo test --no-default-features
 ```
@@ -26,13 +26,13 @@ The VCF comparisons also need htslib 1.23 or newer, whose rules for the end of a
 
 To check the format, lint, and types of all the code, and run every test, run:
 
-```bash
+```console
 uv run poe check-all
 ```
 
 To fix what can be fixed automatically, run:
 
-```bash
+```console
 uv run poe fix-all
 ```
 
@@ -40,7 +40,7 @@ uv run poe fix-all
 
 Compare against the standard library's `gzip` and, if installed, `bgzip` and `tabix` with:
 
-```bash
+```console
 uv run python benchmarks/benchmark.py 200
 ```
 
@@ -58,7 +58,7 @@ To release:
 1. Bump the version in both `pyproject.toml` and `Cargo.toml`, run `uv lock`, and merge a pull request titled `chore(release): bump to X.Y.Z` into `main`.
 2. Tag the merge commit on `main` and push the tag:
 
-   ```bash
+   ```console
    git tag X.Y.Z
    git push origin X.Y.Z
    ```

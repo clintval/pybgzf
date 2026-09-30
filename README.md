@@ -9,8 +9,8 @@ Streaming BGZF compression with on-the-fly tabix and CSI indexing.
 
 Install with pip or uv:
 
-```bash
-❯ pip install pybgzf
+```console
+pip install pybgzf
 ```
 
 ## Introduction
