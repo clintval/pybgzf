@@ -19,6 +19,7 @@ use noodles_csi::binning_index::index::header::format::CoordinateSystem;
 use noodles_csi::binning_index::index::reference_sequence::bin::Chunk;
 use noodles_csi::binning_index::index::reference_sequence::index::Index as ReferenceIndex;
 
+use crate::Error;
 use crate::columns::{Columns, Kind};
 use crate::index::max_position;
 
@@ -228,24 +229,6 @@ impl<R: Read + Seek + Send + 'static> BgzfReader<R> {
         }
     }
 
-    /// Reads up to and including the next newline into `line`, returning the bytes read.
-    pub fn read_line(&mut self, line: &mut Vec<u8>) -> io::Result<usize> {
-        self.read_until(b'\n', line)
-    }
-
-    /// Fills `buf` as far as possible, returning fewer bytes only at the end of the stream.
-    pub fn read_full(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        let mut filled = 0;
-        while filled < buf.len() {
-            let n = self.read(&mut buf[filled..])?;
-            if n == 0 {
-                break;
-            }
-            filled += n;
-        }
-        Ok(filled)
-    }
-
     /// Returns true the first time the stream is found to end without the BGZF end-of-file
     /// marker, which means it may be truncated at a block boundary.
     pub fn take_missing_eof_marker(&mut self) -> bool {
@@ -259,11 +242,6 @@ impl<R: Read + Seek + Send + 'static> BgzfReader<R> {
     /// Returns true if blocks are read ahead on another thread, which may be waiting for data.
     pub fn reads_ahead(&self) -> bool {
         matches!(self.inner, Inner::Parallel(_))
-    }
-
-    /// Stops any worker threads and returns the source.
-    pub fn finish(mut self) -> io::Result<R> {
-        self.stop().map(|source| source.inner)
     }
 
     /// Checks at the end of the stream that no bytes follow the last complete block, then, when
@@ -369,17 +347,10 @@ impl AnyIndex {
         }
     }
 
-    fn header(&self) -> Option<&Header> {
+    fn binning(&self) -> &dyn BinningIndex {
         match self {
-            AnyIndex::Tabix(index) => index.header(),
-            AnyIndex::Csi(index) => index.header(),
-        }
-    }
-
-    fn bins(&self) -> (u32, u32) {
-        match self {
-            AnyIndex::Tabix(index) => (u32::from(index.min_shift()), u32::from(index.depth())),
-            AnyIndex::Csi(index) => (u32::from(index.min_shift()), u32::from(index.depth())),
+            AnyIndex::Tabix(index) => index,
+            AnyIndex::Csi(index) => index,
         }
     }
 
@@ -448,7 +419,8 @@ pub struct Query {
     chunk_end: Option<u64>,
     position: Option<u64>,
     failure: Option<String>,
-    done: bool,
+    /// True once every line has been returned.
+    pub done: bool,
 }
 
 /// A BGZF file with its tabix or CSI index, for reading the lines that overlap a region.
@@ -463,7 +435,7 @@ pub struct IndexedReader<R: Read + Seek + Send + 'static> {
 impl<R: Read + Seek + Send + 'static> IndexedReader<R> {
     /// Pairs a reader with an index that has a tabix header.
     pub fn new(reader: BgzfReader<R>, index: AnyIndex) -> io::Result<Self> {
-        let header = index.header().ok_or_else(|| {
+        let header = index.binning().header().ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::InvalidData,
                 "the index has no tabix header describing its columns",
@@ -496,8 +468,8 @@ impl<R: Read + Seek + Send + 'static> IndexedReader<R> {
 
     /// Starts a query for lines overlapping the 0-based, half-open `[beg, end)` on `name`.
     pub fn query(&self, name: &[u8], beg: i64, end: i64) -> io::Result<Query> {
-        let (min_shift, depth) = self.index.bins();
-        let limit = max_position(min_shift, depth);
+        let index = self.index.binning();
+        let limit = max_position(u32::from(index.min_shift()), u32::from(index.depth()));
         let mut query = Query {
             tid: 0,
             beg,
@@ -528,7 +500,7 @@ impl<R: Read + Seek + Send + 'static> IndexedReader<R> {
     }
 
     /// Reads the next lines of `query`, without their line terminators, appending up to about
-    /// `budget` bytes of them to `lines`. Returns false once the query is exhausted.
+    /// `budget` bytes of them to `lines`.
     ///
     /// A line that cannot be parsed, or that overlaps the region but is not UTF-8, is an error
     /// returned once the lines before it have been.
@@ -537,18 +509,17 @@ impl<R: Read + Seek + Send + 'static> IndexedReader<R> {
         query: &mut Query,
         lines: &mut Vec<String>,
         budget: usize,
-    ) -> Result<bool, QueryError> {
+    ) -> crate::Result<()> {
         if let Some(message) = query.failure.take() {
             query.done = true;
-            return Err(QueryError::Invalid(message));
+            return Err(Error::Invalid(message));
         }
         let mut used = 0;
         while !query.done && used < budget {
-            if query
-                .position
-                .is_some_and(|position| position != self.reader.virtual_position())
+            if let Some(position) = query.position
+                && position != self.reader.virtual_position()
             {
-                self.reader.seek(query.position.expect("checked above"))?;
+                self.reader.seek(position)?;
             }
             let at_chunk_end = match (query.position, query.chunk_end) {
                 (Some(position), Some(end)) => position >= end,
@@ -568,7 +539,7 @@ impl<R: Read + Seek + Send + 'static> IndexedReader<R> {
             }
             let offset = self.reader.virtual_position();
             self.line.clear();
-            if self.reader.read_line(&mut self.line)? == 0 {
+            if self.reader.read_until(b'\n', &mut self.line)? == 0 {
                 query.done = true;
                 break;
             }
@@ -587,7 +558,7 @@ impl<R: Read + Seek + Send + 'static> IndexedReader<R> {
                     break;
                 }
             };
-            if self.names.get_index_of(interval.name) != Some(query.tid)
+            if self.names.get_index(query.tid).map(Vec::as_slice) != Some(interval.name)
                 || interval.beg >= query.end
             {
                 query.done = true;
@@ -605,25 +576,7 @@ impl<R: Read + Seek + Send + 'static> IndexedReader<R> {
                 lines.push(text.to_owned());
             }
         }
-        Ok(!query.done)
-    }
-
-    /// Stops any worker threads.
-    pub fn finish(self) -> io::Result<R> {
-        self.reader.finish()
-    }
-}
-
-/// An error from a query: either I/O failed or a line could not be parsed.
-#[derive(Debug)]
-pub enum QueryError {
-    Io(io::Error),
-    Invalid(String),
-}
-
-impl From<io::Error> for QueryError {
-    fn from(error: io::Error) -> Self {
-        QueryError::Io(error)
+        Ok(())
     }
 }
 
@@ -733,14 +686,14 @@ mod tests {
             for _ in 0..30_000 {
                 marks.push((reader.virtual_position(), {
                     line.clear();
-                    reader.read_line(&mut line).unwrap();
+                    reader.read_until(b'\n', &mut line).unwrap();
                     line.clone()
                 }));
             }
             for (position, expected) in marks.iter().rev().step_by(997) {
                 reader.seek(*position).unwrap();
                 line.clear();
-                reader.read_line(&mut line).unwrap();
+                reader.read_until(b'\n', &mut line).unwrap();
                 assert_eq!(&line, expected);
             }
         }
@@ -782,7 +735,9 @@ mod tests {
                 ] {
                     let mut query = indexed.query(name, beg, end).unwrap();
                     let mut lines = Vec::new();
-                    while indexed.next_lines(&mut query, &mut lines, 1000).unwrap() {}
+                    while !query.done {
+                        indexed.next_lines(&mut query, &mut lines, 1000).unwrap();
+                    }
                     assert_eq!(
                         lines,
                         brute_force(&data, name, beg, end),
@@ -814,9 +769,9 @@ mod tests {
         let mut second = indexed.query(b"chr2", 0, 100_000).unwrap();
         let (mut a, mut b) = (Vec::new(), Vec::new());
         loop {
-            let more_a = indexed.next_lines(&mut first, &mut a, 10).unwrap();
-            let more_b = indexed.next_lines(&mut second, &mut b, 10).unwrap();
-            if !more_a && !more_b {
+            indexed.next_lines(&mut first, &mut a, 10).unwrap();
+            indexed.next_lines(&mut second, &mut b, 10).unwrap();
+            if first.done && second.done {
                 break;
             }
         }
@@ -829,7 +784,10 @@ mod tests {
         let data = bed(10);
         let (_dir, _path, index_path) = written(&data, IndexFormat::Tabix);
         let index = AnyIndex::read(&index_path).unwrap();
-        assert_eq!(header_columns(index.header().unwrap()), Columns::bed());
+        assert_eq!(
+            header_columns(index.binning().header().unwrap()),
+            Columns::bed()
+        );
     }
 
     #[test]
@@ -843,7 +801,7 @@ mod tests {
         assert!(
             BgzfReader::new(Cursor::new(Vec::new()), threads(1))
                 .unwrap()
-                .read_line(&mut Vec::new())
+                .read_until(b'\n', &mut Vec::new())
                 .is_ok()
         );
     }

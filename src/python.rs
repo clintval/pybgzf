@@ -2,7 +2,7 @@
 
 use std::collections::VecDeque;
 use std::fs::File;
-use std::io::{self, BufReader, BufWriter, Read, Seek, SeekFrom, Write};
+use std::io::{self, BufRead, BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::num::NonZero;
 use std::path::{Path, PathBuf};
 use std::thread;
@@ -12,15 +12,13 @@ use pyo3::exceptions::{PyOSError, PyUserWarning, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyString, PyType};
 
+use crate::Error;
 use crate::columns::{Columns, Kind};
 use crate::reader::{
-    AnyIndex, BgzfReader, IndexedReader as CoreIndexedReader, Query, QueryError,
-    ends_with_eof_marker,
+    AnyIndex, BgzfReader, IndexedReader as CoreIndexedReader, Query, ends_with_eof_marker,
 };
 use crate::sniff;
-use crate::writer::{
-    Error, IndexFormat, IndexOptions, Writer as CoreWriter, check_options, csi_format,
-};
+use crate::writer::{IndexFormat, IndexOptions, Writer as CoreWriter, check_options, csi_format};
 
 const FILE_BUFFER: usize = 256 * 1024;
 
@@ -522,14 +520,13 @@ impl Reader {
     /// Reads up to `size` bytes, fewer only at the end of the stream.
     fn read<'py>(&mut self, py: Python<'py>, size: usize) -> PyResult<Bound<'py, PyBytes>> {
         let (inner, path) = self.inner()?;
-        let mut buf = vec![0_u8; size];
-        let n = py
-            .detach(|| inner.read_full(&mut buf))
+        let mut buf = Vec::with_capacity(size);
+        py.detach(|| (&mut *inner).take(size as u64).read_to_end(&mut buf))
             .map_err(|e| path_error(e, path))?;
         if inner.take_missing_eof_marker() {
             warn_truncated(py, path)?;
         }
-        Ok(PyBytes::new(py, &buf[..n]))
+        Ok(PyBytes::new(py, &buf))
     }
 
     /// Reads everything that is left.
@@ -548,7 +545,7 @@ impl Reader {
     fn readline<'py>(&mut self, py: Python<'py>) -> PyResult<Bound<'py, PyBytes>> {
         let (inner, path) = self.inner()?;
         let mut line = Vec::new();
-        py.detach(|| inner.read_line(&mut line))
+        py.detach(|| inner.read_until(b'\n', &mut line))
             .map_err(|e| path_error(e, path))?;
         if inner.take_missing_eof_marker() {
             warn_truncated(py, path)?;
@@ -657,7 +654,6 @@ impl IndexedReader {
             reader: slf.unbind(),
             query,
             lines: VecDeque::new(),
-            done: false,
         })
     }
 
@@ -710,7 +706,6 @@ struct QueryIterator {
     reader: Py<IndexedReader>,
     query: Query,
     lines: VecDeque<String>,
-    done: bool,
 }
 
 #[pymethods]
@@ -724,20 +719,18 @@ impl QueryIterator {
             if let Some(line) = self.lines.pop_front() {
                 return Ok(Some(PyString::new(py, &line)));
             }
-            if self.done {
+            if self.query.done {
                 return Ok(None);
             }
             let mut reader = self.reader.bind(py).borrow_mut();
             let inner = reader.inner()?;
             let query = &mut self.query;
             let mut batch = Vec::new();
-            let more = py
-                .detach(|| inner.next_lines(query, &mut batch, QUERY_BATCH))
+            py.detach(|| inner.next_lines(query, &mut batch, QUERY_BATCH))
                 .map_err(|error| match error {
-                    QueryError::Io(error) => path_error(error, Some(&reader.path)),
-                    QueryError::Invalid(message) => PyValueError::new_err(message),
+                    Error::Io(error) => path_error(error, Some(&reader.path)),
+                    Error::Invalid(message) => PyValueError::new_err(message),
                 })?;
-            self.done = !more;
             self.lines.extend(batch);
         }
     }

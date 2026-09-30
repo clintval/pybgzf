@@ -14,27 +14,13 @@ use crate::block::{BLOCK_SIZE, BlockWriter, LogicalPosition};
 use crate::columns::{Columns, Kind, leading_digits};
 use crate::index::{self, IndexBuilder, max_position};
 use crate::sniff::Sniffer;
+use crate::{Error, Result};
 
 const TABIX_MIN_SHIFT: u32 = 14;
 const TABIX_DEPTH: u32 = 5;
 const TABIX_MAX_SHIFT: u32 = 31;
 const NO_COLUMNS: &str =
     "could not infer columns because no data lines were written; pass columns explicitly";
-
-/// An error from writing: either I/O failed or the data cannot be indexed.
-#[derive(Debug)]
-pub enum Error {
-    Io(io::Error),
-    Invalid(String),
-}
-
-impl From<io::Error> for Error {
-    fn from(error: io::Error) -> Self {
-        Error::Io(error)
-    }
-}
-
-pub type Result<T> = std::result::Result<T, Error>;
 
 /// Which index to build, and how.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
