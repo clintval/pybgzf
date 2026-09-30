@@ -454,6 +454,17 @@ def test_close_races_queries(features: Features) -> None:
         assert got == features.overlapping(*regions[number])[: len(got)]
 
 
+def close_one(files: list[io.RawIOBase], number: int) -> None:
+    files[number % len(files)].close()
+
+
+def test_threads_may_close_at_once(records_path: Path) -> None:
+    for _ in range(200):
+        files: list[io.RawIOBase] = [BgzfWriter(io.BytesIO()), BgzfReader(records_path)]
+        concurrently(functools.partial(close_one, files))
+        assert all(file.closed for file in files)
+
+
 class Reentrant:
     """A source and sink that reads from or writes to the reader or writer calling it."""
 

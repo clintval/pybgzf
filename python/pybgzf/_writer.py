@@ -4,6 +4,7 @@ import codecs
 import io
 import os
 import stat
+import threading
 from enum import Enum
 from typing import Any
 from typing import Protocol
@@ -110,6 +111,7 @@ class BgzfWriter(io.RawIOBase):
         csi_depth: int | None = None,
     ) -> None:
         super().__init__()
+        self._closing: threading.RLock = threading.RLock()
         if isinstance(dest, (str, os.PathLike)):
             path: str | None = os.fspath(dest)
             sink: str | WritableBinary = os.fspath(dest)
@@ -213,14 +215,15 @@ class BgzfWriter(io.RawIOBase):
         Raises:
             ValueError: If the last line cannot be indexed, or columns could not be inferred.
         """
-        if self.closed:
-            return
-        inner: _pybgzf.Writer | None = getattr(self, "_inner", None)
-        try:
-            if inner is not None:
-                inner.close()
-        finally:
-            super().close()
+        with self._closing:
+            if self.closed:
+                return
+            inner: _pybgzf.Writer | None = getattr(self, "_inner", None)
+            try:
+                if inner is not None:
+                    inner.close()
+            finally:
+                super().close()
 
 
 def writer(

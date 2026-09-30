@@ -4,6 +4,7 @@ import codecs
 import errno
 import io
 import os
+import threading
 from collections.abc import Iterator
 from types import TracebackType
 from typing import Protocol
@@ -50,6 +51,7 @@ class BgzfReader(io.RawIOBase):
 
     def __init__(self, src: str | os.PathLike[str] | ReadableBinary, *, threads: int = 1) -> None:
         super().__init__()
+        self._closing: threading.RLock = threading.RLock()
         if isinstance(src, (str, os.PathLike)):
             source: str | ReadableBinary = os.fspath(src)
             self._name: object = source
@@ -117,14 +119,15 @@ class BgzfReader(io.RawIOBase):
         With more than one thread, a pipe or file-like source may be read from once more in the
         background after this returns, if a read was already waiting for data.
         """
-        if self.closed:
-            return
-        inner: _pybgzf.Reader | None = getattr(self, "_inner", None)
-        try:
-            if inner is not None:
-                inner.close()
-        finally:
-            super().close()
+        with self._closing:
+            if self.closed:
+                return
+            inner: _pybgzf.Reader | None = getattr(self, "_inner", None)
+            try:
+                if inner is not None:
+                    inner.close()
+            finally:
+                super().close()
 
 
 def reader(
