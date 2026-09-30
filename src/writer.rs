@@ -12,7 +12,7 @@ use memchr::{memchr, memmem};
 
 use crate::block::{BLOCK_SIZE, BlockWriter, LogicalPosition};
 use crate::columns::{Columns, Kind, leading_digits};
-use crate::index::{self, IndexBuilder, Layout, max_position};
+use crate::index::{self, IndexBuilder, max_position};
 use crate::sniff::Sniffer;
 
 const TABIX_MIN_SHIFT: u32 = 14;
@@ -344,29 +344,19 @@ impl Indexer {
             .builder
             .take()
             .unwrap_or_else(|| IndexBuilder::new(min_shift, depth, first_offset));
-        let layout = Layout {
-            format: index::format(columns.kind, columns.zero_based),
-            refname: columns.refname,
-            start: columns.start,
-            end: columns.end,
-            meta_char: columns.meta_char,
-            skip_lines: columns.skip_lines as u32,
-        };
         let file = self
             .file
             .take()
             .ok_or_else(|| io::Error::other("the index was already written"))?;
-        let file = BufWriter::new(file);
-        let mut file = match self.format {
-            IndexFormat::Tabix => index::write_tabix(
-                file,
-                &index::tabix(builder, final_offset, &layout, &self.names),
-            )?,
-            IndexFormat::Csi { .. } => index::write_csi(
-                file,
-                &index::csi(builder, final_offset, &layout, &self.names),
-            )?,
-        };
+        let csi = matches!(self.format, IndexFormat::Csi { .. });
+        let mut file = index::write(
+            BufWriter::new(file),
+            builder,
+            final_offset,
+            &columns,
+            &self.names,
+            csi,
+        )?;
         file.flush()?;
         Ok(())
     }

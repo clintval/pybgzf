@@ -6,15 +6,16 @@ use std::io::{self, Write};
 
 use bstr::BString;
 use indexmap::{IndexMap, IndexSet};
-use noodles_bgzf::VirtualPosition;
 use noodles_csi::binning_index::index::header::format::CoordinateSystem;
 use noodles_csi::binning_index::index::header::{Format, Header};
 use noodles_csi::binning_index::index::reference_sequence::Bin;
 use noodles_csi::binning_index::index::reference_sequence::bin::Chunk;
-use noodles_csi::binning_index::index::reference_sequence::index::{BinnedIndex, LinearIndex};
+use noodles_csi::binning_index::index::reference_sequence::index::{
+    BinnedIndex, Index as ReferenceIndex, LinearIndex,
+};
 use noodles_csi::binning_index::index::{Index, ReferenceSequence};
 
-use crate::columns::Kind;
+use crate::columns::{Columns, Kind};
 use crate::khash::KhashOrder;
 
 const MIN_MARKER_DISTANCE: u64 = 0x10000;
@@ -82,6 +83,7 @@ impl Reference {
 
     fn set_metadata(&mut self, depth: u32, start: u64, end: u64, count: u64) {
         let id = metadata_bin(depth);
+        // htslib puts this key twice, and khash may resize on a put even when the key exists.
         self.order.put(id);
         self.order.put(id);
         self.metadata = Some((start, end, count));
@@ -240,52 +242,33 @@ impl IndexBuilder {
     }
 }
 
-/// How lines were laid out, as recorded in the index header.
-pub struct Layout {
-    pub format: Format,
-    pub refname: usize,
-    pub start: usize,
-    pub end: Option<usize>,
-    pub meta_char: u8,
-    pub skip_lines: u32,
-}
-
-impl Layout {
-    fn header(&self, names: &IndexSet<Vec<u8>>) -> Header {
-        let names = names
-            .iter()
-            .map(|name| BString::from(name.clone()))
-            .collect();
-        noodles_csi::binning_index::index::header::Builder::default()
-            .set_format(self.format)
-            .set_reference_sequence_name_index(self.refname - 1)
-            .set_start_position_index(self.start - 1)
-            .set_end_position_index(self.end.map(|end| end - 1))
-            .set_line_comment_prefix(self.meta_char)
-            .set_line_skip_count(self.skip_lines)
-            .set_reference_sequence_names(names)
-            .build()
-    }
-}
-
-/// Returns the tabix format for generic, SAM, or VCF lines.
-pub fn format(kind: Kind, zero_based: bool) -> Format {
-    match kind {
+fn header(columns: &Columns, names: &IndexSet<Vec<u8>>) -> Header {
+    let format = match columns.kind {
         Kind::Sam => Format::Sam,
         Kind::Vcf => Format::Vcf,
-        Kind::Generic if zero_based => Format::Generic(CoordinateSystem::Bed),
+        Kind::Generic if columns.zero_based => Format::Generic(CoordinateSystem::Bed),
         Kind::Generic => Format::Generic(CoordinateSystem::Gff),
-    }
-}
-
-fn vpos(value: u64) -> VirtualPosition {
-    VirtualPosition::from(value)
+    };
+    noodles_csi::binning_index::index::header::Builder::default()
+        .set_format(format)
+        .set_reference_sequence_name_index(columns.refname - 1)
+        .set_start_position_index(columns.start - 1)
+        .set_end_position_index(columns.end.map(|end| end - 1))
+        .set_line_comment_prefix(columns.meta_char)
+        .set_line_skip_count(columns.skip_lines as u32)
+        .set_reference_sequence_names(
+            names
+                .iter()
+                .map(|name| BString::from(name.clone()))
+                .collect(),
+        )
+        .build()
 }
 
 fn chunks(pairs: &[(u64, u64)]) -> Vec<Chunk> {
     pairs
         .iter()
-        .map(|&(start, end)| Chunk::new(vpos(start), vpos(end)))
+        .map(|&(start, end)| Chunk::new(start.into(), end.into()))
         .collect()
 }
 
@@ -294,16 +277,80 @@ fn metadata_bin(depth: u32) -> u32 {
 }
 
 /// Returns the bins, and the metadata pseudo-bin, in the order htslib writes them.
-fn ordered_bins(reference: &Reference, depth: u32) -> Vec<(u32, Vec<(u64, u64)>)> {
+fn ordered_bins(reference: &Reference, depth: u32) -> impl Iterator<Item = (u32, Bin)> + '_ {
     let metadata_id = metadata_bin(depth);
-    reference
-        .order
-        .keys()
-        .filter_map(|id| match (id == metadata_id, reference.metadata) {
-            (true, Some((start, end, count))) => Some((id, vec![(start, end), (count, 0)])),
-            _ => reference.bins.get(&id).map(|pairs| (id, pairs.clone())),
+    reference.order.keys().filter_map(move |id| {
+        let pairs = match (id == metadata_id, reference.metadata) {
+            (true, Some((start, end, count))) => &[(start, end), (count, 0)][..],
+            _ => reference.bins.get(&id)?,
+        };
+        Some((id, Bin::new(chunks(pairs))))
+    })
+}
+
+fn build<I: ReferenceIndex>(
+    (min_shift, depth): (u32, u32),
+    header: Header,
+    references: Vec<ReferenceSequence<I>>,
+) -> Index<I> {
+    Index::builder()
+        .set_min_shift(min_shift as u8)
+        .set_depth(depth as u8)
+        .set_header(header)
+        .set_reference_sequences(references)
+        .set_unplaced_unmapped_record_count(0)
+        .build()
+}
+
+/// Writes the index of `builder`'s records, as CSI when `csi` and tabix otherwise, as BGZF to
+/// `sink`.
+pub fn write<W: Write>(
+    sink: W,
+    builder: IndexBuilder,
+    final_offset: u64,
+    columns: &Columns,
+    names: &IndexSet<Vec<u8>>,
+    csi: bool,
+) -> io::Result<W> {
+    let (min_shift, depth, references) = builder.finish(final_offset);
+    let header = header(columns, names);
+    if !csi {
+        let references = references
+            .iter()
+            .map(|reference| {
+                let bins: IndexMap<usize, Bin> = ordered_bins(reference, depth)
+                    .map(|(id, bin)| (id as usize, bin))
+                    .collect();
+                let linear: LinearIndex = reference.linear.iter().map(|&o| o.into()).collect();
+                ReferenceSequence::new(bins, linear, None)
+            })
+            .collect();
+        let mut writer = noodles_tabix::io::Writer::new(sink);
+        writer.write_index(&build((min_shift, depth), header, references))?;
+        return writer.into_inner().finish();
+    }
+    let bin_count = bin_first(depth + 1);
+    let references = references
+        .iter()
+        .map(|reference| {
+            let mut bins = IndexMap::new();
+            let mut offsets = BinnedIndex::new();
+            for (id, bin) in ordered_bins(reference, depth) {
+                let offset = if id < bin_count {
+                    let bottom = bin_bottom(id, depth);
+                    reference.linear.get(bottom).copied().unwrap_or(0)
+                } else {
+                    0
+                };
+                bins.insert(id as usize, bin);
+                offsets.insert(id as usize, offset.into());
+            }
+            ReferenceSequence::new(bins, offsets, None)
         })
-        .collect()
+        .collect();
+    let mut writer = noodles_csi::io::Writer::new(sink);
+    writer.write_index(&build((min_shift, depth), header, references))?;
+    writer.into_inner().finish()
 }
 
 #[cfg(test)]
@@ -315,88 +362,6 @@ fn sorted_bins(reference: &Reference) -> Vec<(u32, &Vec<(u64, u64)>)> {
         .collect();
     bins.sort_unstable_by_key(|&(id, _)| id);
     bins
-}
-
-/// Builds a tabix index from `builder`.
-pub fn tabix(
-    builder: IndexBuilder,
-    final_offset: u64,
-    layout: &Layout,
-    names: &IndexSet<Vec<u8>>,
-) -> noodles_tabix::Index {
-    let (min_shift, depth, references) = builder.finish(final_offset);
-    let references = references
-        .iter()
-        .map(|reference| {
-            let bins: IndexMap<usize, Bin> = ordered_bins(reference, depth)
-                .into_iter()
-                .map(|(id, pairs)| (id as usize, Bin::new(chunks(&pairs))))
-                .collect();
-            let linear: LinearIndex = reference
-                .linear
-                .iter()
-                .map(|&offset| vpos(offset))
-                .collect();
-            ReferenceSequence::new(bins, linear, None)
-        })
-        .collect();
-    Index::builder()
-        .set_min_shift(min_shift as u8)
-        .set_depth(depth as u8)
-        .set_header(layout.header(names))
-        .set_reference_sequences(references)
-        .set_unplaced_unmapped_record_count(0)
-        .build()
-}
-
-/// Builds a CSI index from `builder`.
-pub fn csi(
-    builder: IndexBuilder,
-    final_offset: u64,
-    layout: &Layout,
-    names: &IndexSet<Vec<u8>>,
-) -> noodles_csi::Index {
-    let (min_shift, depth, references) = builder.finish(final_offset);
-    let bin_count = bin_first(depth + 1);
-    let references = references
-        .iter()
-        .map(|reference| {
-            let mut bins = IndexMap::new();
-            let mut offsets = BinnedIndex::new();
-            for (id, pairs) in ordered_bins(reference, depth) {
-                let offset = if id < bin_count {
-                    let bottom = bin_bottom(id, depth);
-                    reference.linear.get(bottom).copied().unwrap_or(0)
-                } else {
-                    0
-                };
-                bins.insert(id as usize, Bin::new(chunks(&pairs)));
-                offsets.insert(id as usize, vpos(offset));
-            }
-            ReferenceSequence::new(bins, offsets, None)
-        })
-        .collect();
-    Index::builder()
-        .set_min_shift(min_shift as u8)
-        .set_depth(depth as u8)
-        .set_header(layout.header(names))
-        .set_reference_sequences(references)
-        .set_unplaced_unmapped_record_count(0)
-        .build()
-}
-
-/// Writes a tabix index as BGZF to `sink`.
-pub fn write_tabix<W: Write>(sink: W, index: &noodles_tabix::Index) -> io::Result<W> {
-    let mut writer = noodles_tabix::io::Writer::new(sink);
-    writer.write_index(index)?;
-    writer.into_inner().finish()
-}
-
-/// Writes a CSI index as BGZF to `sink`.
-pub fn write_csi<W: Write>(sink: W, index: &noodles_csi::Index) -> io::Result<W> {
-    let mut writer = noodles_csi::io::Writer::new(sink);
-    writer.write_index(index)?;
-    writer.into_inner().finish()
 }
 
 #[cfg(test)]
