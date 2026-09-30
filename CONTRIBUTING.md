@@ -48,11 +48,6 @@ uv run python benchmarks/benchmark.py 200
 
 Releases are published to PyPI by the [`publish_pybgzf.yml`](.github/workflows/publish_pybgzf.yml) workflow with PyPI Trusted Publishing, so no API token is stored in GitHub.
 
-One-time setup:
-
-1. On PyPI, add a pending trusted publisher for the project `pybgzf` with owner `clintval`, repository `pybgzf`, workflow `publish_pybgzf.yml`, and environment `pypi`; it becomes a trusted publisher when the first release creates the project.
-2. On GitHub, create the environments `pypi` and `github` in the repository settings, optionally with required reviewers.
-
 To release:
 
 1. Bump the version in `Cargo.toml`, the only place it is set, since `pyproject.toml` reads it from there, run `cargo update --workspace` to update `Cargo.lock`, and merge a pull request titled `chore(release): bump to X.Y.Z` into `main`.
