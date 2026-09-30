@@ -150,11 +150,16 @@ impl<R: Read + Seek + Send + 'static> BgzfReader<R> {
         }
         let target = VirtualPosition::from(position);
         let (block, offset) = target.into();
-        match &mut self.inner {
-            Inner::Serial(reader) => reader.seek(target).map(drop)?,
-            Inner::Parallel(reader) => reader.seek_to_virtual_position(target).map(drop)?,
+        let sought = match &mut self.inner {
+            Inner::Serial(reader) => reader.seek(target).map(drop),
+            Inner::Parallel(reader) => reader.seek_to_virtual_position(target).map(drop),
             Inner::Exhausted { .. } | Inner::Failed { .. } => return Err(failed_earlier()),
-        }
+        };
+        // Some systems refuse to seek a file past their largest offset rather than past its end.
+        sought.map_err(|error| match error.kind() {
+            io::ErrorKind::InvalidInput => not_in_file(position),
+            _ => error,
+        })?;
         if self.compressed_position() == block {
             let mut source = self.stop()?;
             let end = source.seek(SeekFrom::End(0))?;
