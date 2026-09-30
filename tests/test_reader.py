@@ -415,3 +415,15 @@ def test_reference_names_that_are_not_utf8_raise(tmp_path: Path) -> None:
         writer.write("chré\t1\t2\n".encode("latin-1"))
     with IndexedReader(path) as reader, pytest.raises(ValueError, match="not UTF-8"):
         _ = reader.refnames
+
+
+@pytest.mark.parametrize("threads", [1, 3])
+def test_reads_files_without_an_end_of_file_marker(data_dir: Path, threads: int) -> None:
+    compressed = bed_path(data_dir, IndexFormat.TBI).read_bytes()
+    expected = gzip.decompress(compressed)
+    chunks: list[bytes] = []
+    with BgzfReader(io.BytesIO(compressed[:-28]), threads=threads) as reader:
+        for _ in range(len(expected) // 65536 + 2):
+            chunks.append(reader.read(65536))
+    assert b"".join(chunks) == expected
+    assert chunks[-1] == b""

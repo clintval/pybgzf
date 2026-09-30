@@ -21,6 +21,10 @@ use crate::index::max_position;
 
 const FILE_BUFFER: usize = 128 * 1024;
 
+/// Keeps reads off a noodles fast path that repeats the last block at the end of a stream
+/// without an end-of-file marker.
+const SERIAL_READ_LIMIT: usize = u16::MAX as usize;
+
 enum Inner<R: Read + Send + 'static> {
     Serial(SerialReader<R>),
     Parallel(MultithreadedReader<R>),
@@ -145,7 +149,8 @@ impl<R: Read + Seek + Send + 'static> BgzfReader<R> {
 impl<R: Read + Seek + Send + 'static> Read for BgzfReader<R> {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         if let Inner::Serial(reader) = &mut self.inner {
-            return reader.read(buf);
+            let n = buf.len().min(SERIAL_READ_LIMIT);
+            return reader.read(&mut buf[..n]);
         }
         let data = self.fill_buf()?;
         let n = data.len().min(buf.len());
