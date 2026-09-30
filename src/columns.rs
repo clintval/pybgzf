@@ -204,11 +204,20 @@ fn integer_prefix(bytes: &[u8]) -> Option<(i64, usize)> {
 /// Parses the leading ASCII digits of `bytes` as a saturating base-10 integer, returning it and
 /// the number of digits, or `None` without digits.
 pub fn leading_digits(bytes: &[u8]) -> Option<(i64, usize)> {
-    let digits = bytes.iter().take_while(|b| b.is_ascii_digit()).count();
-    let value = bytes[..digits].iter().fold(0_i64, |value, &b| {
-        value.saturating_mul(10).saturating_add(i64::from(b - b'0'))
-    });
-    (digits > 0).then_some((value, digits))
+    let mut value = 0_i64;
+    for (at, &b) in bytes.iter().enumerate() {
+        let digit = b.wrapping_sub(b'0');
+        if digit > 9 {
+            return (at > 0).then_some((value, at));
+        }
+        // No 18-digit number overflows an i64, so only later digits need to saturate.
+        value = if at < 18 {
+            value * 10 + i64::from(digit)
+        } else {
+            value.saturating_mul(10).saturating_add(i64::from(digit))
+        };
+    }
+    (!bytes.is_empty()).then_some((value, bytes.len()))
 }
 
 fn parse_integer(bytes: &[u8]) -> Option<i64> {
