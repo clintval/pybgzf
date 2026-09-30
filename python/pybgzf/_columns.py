@@ -62,6 +62,7 @@ class Columns:
     format: LineFormat = LineFormat.GENERIC
 
     BED: ClassVar[Columns]
+    BED2: ClassVar[Columns]
     GFF: ClassVar[Columns]
     VCF: ClassVar[Columns]
     SAM: ClassVar[Columns]
@@ -106,7 +107,8 @@ class Columns:
         and `@CO` are SAM, and `##gff-version` is GFF.
         Lines starting with `track `, `browser `, or `#` are skipped.
         Otherwise the first data line decides: GFF if it has nine fields that look like GFF or GTF,
-        else BED if its second and third fields are ordered, non-negative integers.
+        else BED if its second and third fields are ordered, non-negative integers, or BED2 if it
+        has only two fields and the second is a non-negative integer.
         Leading `track ` and `browser ` lines of a BED or GFF file become `skip_lines`.
 
         Raises:
@@ -143,6 +145,7 @@ def columns_from_tuple(values: ColumnsTuple) -> Columns:
 
 
 Columns.BED = Columns(refname=1, start=2, end=3, zero_based=True, meta_char="#")
+Columns.BED2 = Columns(refname=1, start=2, end=None, zero_based=True, meta_char="#")
 Columns.GFF = Columns(refname=1, start=4, end=5, zero_based=False, meta_char="#")
 Columns.VCF = Columns(
     refname=1, start=2, end=None, zero_based=False, meta_char="#", format=LineFormat.VCF

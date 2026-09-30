@@ -69,7 +69,8 @@ class BgzfWriter(io.RawIOBase):
         index_path: Where to write the index; defaults to `dest` plus `.tbi` or `.csi`, and is
             required when `index` is set and `dest` is a file-like object.
         columns: Where each line keeps its reference, start, and end; required when `index` is set.
-            `INFER` infers them from the file name, or else from the content as it streams.
+            `INFER` infers them from the file name, or else from the content as it streams; a
+            BED file whose first data line has two fields is BED2.
             Without `index`, columns are not used.
         csi_min_shift: The width, as a power of two, of the smallest CSI bin.
         csi_depth: The number of CSI bin levels; None chooses as `tabix -C` does.
@@ -114,6 +115,7 @@ class BgzfWriter(io.RawIOBase):
         index_file = None if index_path is None else os.fspath(index_path)
 
         infer = isinstance(columns, Infer)
+        infer_bed = False
         explicit: Columns | None = columns if isinstance(columns, Columns) else None
         if infer and index_file is not None:
             index_name = index_file
@@ -122,6 +124,8 @@ class BgzfWriter(io.RawIOBase):
             names = [path, index_name] if path is not None and regular else [index_name]
             explicit = _suffix_columns(*names)
             infer = explicit is None
+            if explicit == Columns.BED:
+                explicit, infer_bed = None, True
 
         self._columns: Columns | None = explicit
         self._name: object = path if path is not None else getattr(dest, "name", None)
@@ -133,6 +137,7 @@ class BgzfWriter(io.RawIOBase):
             index_path=index_file,
             columns=None if explicit is None or index is None else columns_to_tuple(explicit),
             infer=infer and index is not None,
+            infer_bed=infer_bed and index is not None,
             csi_min_shift=csi_min_shift,
             csi_depth=csi_depth,
         )

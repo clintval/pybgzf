@@ -62,6 +62,18 @@ impl Columns {
         }
     }
 
+    pub fn bed2() -> Self {
+        Self {
+            refname: 1,
+            start: 2,
+            end: None,
+            zero_based: true,
+            meta_char: b'#',
+            skip_lines: 0,
+            kind: Kind::Generic,
+        }
+    }
+
     pub fn gff() -> Self {
         Self {
             refname: 1,

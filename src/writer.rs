@@ -46,6 +46,7 @@ pub struct IndexOptions {
     pub format: IndexFormat,
     pub path: PathBuf,
     pub columns: Option<Columns>,
+    pub bed_only: bool,
 }
 
 struct Record {
@@ -123,7 +124,11 @@ impl Indexer {
             format: options.format,
             path: options.path,
             columns: options.columns,
-            sniffer: Sniffer::default(),
+            sniffer: if options.bed_only {
+                Sniffer::bed()
+            } else {
+                Sniffer::default()
+            },
             partial: Vec::new(),
             line_number: 0,
             names: IndexSet::new(),
@@ -560,6 +565,7 @@ mod tests {
             format,
             path: dir.path().join("out.bed.gz.idx"),
             columns,
+            bed_only: false,
         }
     }
 

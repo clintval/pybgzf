@@ -441,3 +441,31 @@ def test_a_regular_file_gets_the_default_index_path(tmp_path: Path) -> None:
     with BgzfWriter(path, index=IndexFormat.CSI, columns=Columns.BED) as writer:
         writer.write(b"chr1\t1\t2\n")
     assert Path(f"{path}.csi").exists()
+
+
+@pytest.mark.parametrize(
+    ("name", "text", "expected"),
+    [
+        ("points.bed.gz", "#c\nchr1\t5\nchr1\t9\n", Columns.BED2),
+        ("points.bed.gz", "track name=x\nchr1\t5\n", Columns(1, 2, None, True, "#", skip_lines=1)),
+        ("features.bed.gz", "chr1\t5\t6\n", Columns.BED),
+        ("features.bed.gz", "chr1\t5\t6\tname\n", Columns.BED),
+        ("stream", "chr1\t5\n", Columns.BED2),
+    ],
+)
+def test_two_column_bed_is_inferred_as_bed2(
+    tmp_path: Path, name: str, text: str, expected: Columns
+) -> None:
+    with pybgzf.open(tmp_path / name, index=IndexFormat.TBI, columns=INFER) as handle:
+        handle.write(text)
+        writer = handle.buffer
+        assert isinstance(writer, BgzfWriter)
+    assert writer.columns == expected
+
+
+def test_bed_accepts_lines_without_an_end(tmp_path: Path) -> None:
+    for columns in (Columns.BED, Columns.BED2):
+        path = tmp_path / f"{columns.end}.bed.gz"
+        with pybgzf.open(path, index=IndexFormat.TBI, columns=columns) as handle:
+            handle.write("chr1\t5\nchr1\t9\t20\n")
+        assert Path(f"{path}.tbi").exists()

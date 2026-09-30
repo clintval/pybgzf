@@ -250,3 +250,27 @@ def test_inferred_columns_index_like_tabix(tmp_path: Path) -> None:
     with pybgzf.open(path, index=TBI, index_path=tmp_path / "stream.tbi", columns=INFER) as handle:
         handle.write(VCF)
     assert read_index(tmp_path / "stream.tbi") == read_index(htslib_index(path, TBI, "-p", "vcf"))
+
+BED2 = "#chrom\tposition\n" + "".join(
+    f"chr{name}\t{position}\n" for name in (1, 2) for position in range(0, 3_000_000, 173)
+)
+MIXED_BED = "".join(
+    f"chr1\t{position}\n" if position % 3 else f"chr1\t{position}\t{position + 500}\n"
+    for position in range(0, 3_000_000, 211)
+)
+
+
+@pytest.mark.parametrize("text", [BED2, MIXED_BED], ids=["bed2", "mixed"])
+def test_bed_without_an_end_column_is_byte_identical(tmp_path: Path, text: str) -> None:
+    path = tmp_path / "points.bed.gz"
+    ours = write(path, text, TBI, Columns.BED)
+    theirs = htslib_index(path, TBI, "-p", "bed")
+    assert gzip.decompress(ours.read_bytes()) == gzip.decompress(theirs.read_bytes())
+
+
+@pytest.mark.parametrize("index", [TBI, CSI])
+def test_bed2_matches_tabix_point_columns(tmp_path: Path, index: IndexFormat) -> None:
+    path = tmp_path / "points.bed.gz"
+    ours = write(path, BED2, index, Columns.BED2)
+    theirs = htslib_index(path, index, "-0", "-s", "1", "-b", "2", "-e", "2")
+    assert_identical(ours, theirs)

@@ -76,3 +76,8 @@ def test_presets() -> None:
 def test_invalid_columns(make: Callable[[], Columns]) -> None:
     with pytest.raises(ValueError):
         make()
+
+
+def test_sniff_two_columns_as_bed2() -> None:
+    assert Columns.sniff(["chr1\t5"]) == Columns.BED2
+    assert Columns.BED2 == Columns(1, 2, None, True, "#")

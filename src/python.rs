@@ -125,7 +125,7 @@ struct Writer {
 #[pymethods]
 impl Writer {
     #[new]
-    #[pyo3(signature = (dest, *, level, threads, index, index_path, columns, infer, csi_min_shift, csi_depth))]
+    #[pyo3(signature = (dest, *, level, threads, index, index_path, columns, infer, infer_bed, csi_min_shift, csi_depth))]
     #[allow(clippy::too_many_arguments)]
     fn new(
         dest: &Bound<'_, PyAny>,
@@ -135,10 +135,12 @@ impl Writer {
         index_path: Option<PathBuf>,
         columns: Option<ColumnsTuple>,
         infer: bool,
+        infer_bed: bool,
         csi_min_shift: u32,
         csi_depth: Option<u32>,
     ) -> PyResult<Self> {
         let columns = columns.map(columns_from_tuple).transpose()?;
+        let infer = infer || infer_bed;
         let options = match index {
             None => {
                 if index_path.is_some() {
@@ -173,6 +175,7 @@ impl Writer {
                     format,
                     path,
                     columns: if infer { None } else { columns },
+                    bed_only: infer_bed,
                 })
             }
         };

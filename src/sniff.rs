@@ -1,6 +1,6 @@
 //! Deciding the column layout from content while it streams.
 
-use crate::columns::Columns;
+use crate::columns::{Columns, Kind};
 
 const SAM_HEADERS: [&[u8]; 5] = [b"@HD", b"@SQ", b"@RG", b"@PG", b"@CO"];
 
@@ -9,6 +9,7 @@ const SAM_HEADERS: [&[u8]; 5] = [b"@HD", b"@SQ", b"@RG", b"@PG", b"@CO"];
 pub struct Sniffer {
     first_bytes: Vec<u8>,
     last_track_line: u64,
+    bed_only: bool,
 }
 
 fn is_sam_header(line: &[u8]) -> bool {
@@ -36,7 +37,19 @@ fn looks_like_bed(fields: &[&[u8]]) -> bool {
         && matches!((integer(fields[1]), integer(fields[2])), (Some(start), Some(end)) if start <= end)
 }
 
+fn looks_like_bed2(fields: &[&[u8]]) -> bool {
+    fields.len() == 2 && integer(fields[1]).is_some()
+}
+
 impl Sniffer {
+    /// Returns a sniffer that only chooses between BED and BED2, for files named as BED.
+    pub fn bed() -> Self {
+        Self {
+            bed_only: true,
+            ..Self::default()
+        }
+    }
+
     /// Returns the number of lines seen before a decision.
     pub fn lines_seen(&self) -> u64 {
         self.first_bytes.len() as u64
@@ -47,11 +60,12 @@ impl Sniffer {
     /// would not be a header line under the decided layout.
     pub fn push(&mut self, line: &[u8]) -> Result<Option<Columns>, String> {
         let line_number = self.lines_seen() + 1;
-        let decided = if line.starts_with(b"##fileformat=VCF") {
+        let headers = !self.bed_only;
+        let decided = if headers && line.starts_with(b"##fileformat=VCF") {
             Columns::vcf()
-        } else if is_sam_header(line) {
+        } else if headers && is_sam_header(line) {
             Columns::sam()
-        } else if line.starts_with(b"##gff-version") {
+        } else if headers && line.starts_with(b"##gff-version") {
             Columns {
                 skip_lines: self.last_track_line,
                 ..Columns::gff()
@@ -65,7 +79,17 @@ impl Sniffer {
             return Ok(None);
         } else {
             let fields: Vec<&[u8]> = line.split(|&b| b == b'\t').collect();
-            if looks_like_gff(&fields) {
+            if self.bed_only {
+                let columns = if fields.len() == 2 {
+                    Columns::bed2()
+                } else {
+                    Columns::bed()
+                };
+                Columns {
+                    skip_lines: self.last_track_line,
+                    ..columns
+                }
+            } else if looks_like_gff(&fields) {
                 Columns {
                     skip_lines: self.last_track_line,
                     ..Columns::gff()
@@ -74,6 +98,11 @@ impl Sniffer {
                 Columns {
                     skip_lines: self.last_track_line,
                     ..Columns::bed()
+                }
+            } else if looks_like_bed2(&fields) {
+                Columns {
+                    skip_lines: self.last_track_line,
+                    ..Columns::bed2()
                 }
             } else {
                 return Err(format!(
@@ -96,14 +125,12 @@ impl Sniffer {
 }
 
 fn describe(columns: &Columns) -> &'static str {
-    if *columns == Columns::vcf() {
-        "VCF"
-    } else if *columns == Columns::sam() {
-        "SAM"
-    } else if columns.start == 4 {
-        "GFF"
-    } else {
-        "BED"
+    match (columns.kind, columns.start, columns.end) {
+        (Kind::Vcf, ..) => "VCF",
+        (Kind::Sam, ..) => "SAM",
+        (_, 4, _) => "GFF",
+        (_, _, None) => "BED2",
+        _ => "BED",
     }
 }
 
@@ -136,6 +163,21 @@ mod tests {
         let gtf = "chr1\tsrc\texon\t1\t10\t0.5\t-\t0\tgene_id \"a\";";
         assert_eq!(sniff(&[gtf]), Ok(Columns::gff()));
         assert_eq!(sniff(&["chr1\t0\t10\tname"]), Ok(Columns::bed()));
+    }
+
+    #[test]
+    fn two_column_lines_are_bed2() {
+        assert_eq!(sniff(&["#c", "chr1\t5"]), Ok(Columns::bed2()));
+        assert!(sniff(&["chr1\tfive"]).is_err());
+    }
+
+    #[test]
+    fn bed_files_choose_between_bed_and_bed2() {
+        let mut sniffer = Sniffer::bed();
+        assert_eq!(sniffer.push(b"##fileformat=VCFv4.2"), Ok(None));
+        assert_eq!(sniffer.push(b"chr1\t5"), Ok(Some(Columns::bed2())));
+        let mut sniffer = Sniffer::bed();
+        assert_eq!(sniffer.push(b"chr1\t5\t6\tx"), Ok(Some(Columns::bed())));
     }
 
     #[test]

@@ -19,6 +19,7 @@ class Writer:
         index_path: str | None,
         columns: ColumnsTuple | None,
         infer: bool,
+        infer_bed: bool,
         csi_min_shift: int,
         csi_depth: int | None,
     ) -> Writer: ...
