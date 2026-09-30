@@ -316,15 +316,15 @@ impl<R: Read + Seek + Send + 'static> IndexedReader<R> {
         let Some(tid) = self.names.get_index_of(name) else {
             return Ok(query);
         };
-        let clamped_end = end.min(limit - 1);
-        if beg >= clamped_end {
+        if beg >= end {
             return Ok(query);
         }
         let to_position = |value: i64| {
             Position::new(usize::try_from(value).map_err(io::Error::other)?)
                 .ok_or_else(|| io::Error::other("positions are 1-based"))
         };
-        let interval = Interval::from(to_position(beg + 1)?..=to_position(clamped_end)?);
+        let (first, last) = (beg.min(limit - 2) + 1, end.min(limit - 1));
+        let interval = Interval::from(to_position(first)?..=to_position(last)?);
         query.tid = tid;
         query.chunks = self.index.chunks(tid, interval)?;
         query.done = query.chunks.is_empty();

@@ -343,3 +343,15 @@ def test_seeking_after_the_end_reads_again(data_dir: Path, threads: int) -> None
         reader.seek(0)
         assert reader.readline() == first
         assert len(first) + len(reader.readall()) == end
+
+
+@pytest.mark.parametrize("index", [IndexFormat.TBI, IndexFormat.CSI])
+def test_queries_reach_the_last_position_an_index_holds(tmp_path: Path, index: IndexFormat) -> None:
+    path = tmp_path / "edge.bed.gz"
+    last = "chr1\t536870911\t536870912"
+    with BgzfWriter(path, index=index, columns=Columns.BED, csi_depth=5) as writer:
+        writer.write(f"chr1\t0\t1\n{last}\n".encode())
+    with IndexedReader(path) as reader:
+        assert list(reader.query("chr1", 536870911, 536870912)) == [last]
+        assert list(reader.query("chr1", 536870900, 10**12)) == [last]
+        assert list(reader.query("chr1", 536870912, 10**12)) == []
