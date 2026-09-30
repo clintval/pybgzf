@@ -85,7 +85,7 @@ check-lock      = "uv lock --check"
 check-pyproject = "validate-pyproject pyproject.toml"
 check-format    = "ruff format --check --diff"
 check-lint      = "ruff check"
-check-tests     = "pytest --doctest-glob='*.md'"
+check-tests     = "pytest"
 
 _check-mypy    = "mypy"
 _check-pyright = "basedpyright"
@@ -120,6 +120,7 @@ addopts    = [
     "--cov-fail-under=90",
     "--cov-report=term-missing",
     "--cov=pybgzf",
+    "--doctest-glob=*.md",
     "--doctest-plus",
     "--import-mode=importlib",
 ]

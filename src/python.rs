@@ -177,8 +177,9 @@ impl Writer {
             }
         };
         check_options(level, threads, options.as_ref()).map_err(to_python)?;
-        let sink = if let Ok(path) = dest.cast::<PyString>() {
-            let file = File::create(path.to_str()?).map_err(|e| to_python(Error::Io(e)))?;
+        let sink = if dest.is_instance_of::<PyString>() {
+            let path: PathBuf = dest.extract()?;
+            let file = File::create(path).map_err(|e| to_python(Error::Io(e)))?;
             Sink::File(BufWriter::with_capacity(FILE_BUFFER, file))
         } else {
             Sink::Python(dest.clone().unbind())
