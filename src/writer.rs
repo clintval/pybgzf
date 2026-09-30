@@ -592,7 +592,7 @@ impl<W: Write> Writer<W> {
         }
     }
 
-    /// Returns the sink.
+    #[cfg(test)]
     pub fn get_ref(&self) -> &W {
         self.blocks.get_ref()
     }

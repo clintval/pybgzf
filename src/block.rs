@@ -184,7 +184,7 @@ impl<W: Write> BlockWriter<W> {
         Ok(eof_start << 16)
     }
 
-    /// Returns the sink.
+    #[cfg(test)]
     pub fn get_ref(&self) -> &W {
         &self.sink
     }
