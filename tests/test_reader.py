@@ -533,6 +533,21 @@ def test_an_indexed_file_without_an_end_of_file_marker_warns_when_opened(
         assert list(reader.query("chr1", 0, 1 << 20))
 
 
+@pytest.mark.parametrize("index", [IndexFormat.TBI, IndexFormat.CSI])
+def test_a_query_of_a_file_its_index_does_not_describe_says_so(
+    data_dir: Path, index: IndexFormat, tmp_path: Path
+) -> None:
+    suffix = ".tbi" if index is IndexFormat.TBI else ".csi"
+    path = tmp_path / "other.bed.gz"
+    with pybgzf.writer(path, columns=Columns.BED) as handle:
+        _ = handle.write("chr1\t0\t1\tonly\n")
+    with (
+        IndexedReader(path, index_path=f"{bed_path(data_dir, index)}{suffix}") as reader,
+        pytest.raises(OSError, match="changed since it was opened"),
+    ):
+        _ = list(reader.query("chr2", 0, 1 << 29))
+
+
 def block_starts(data: bytes) -> list[int]:
     starts: list[int] = []
     at = 0
