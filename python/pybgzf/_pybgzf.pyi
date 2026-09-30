@@ -17,11 +17,15 @@ __all__ = [
     "QueryIterator",
     "Reader",
     "Sniffer",
+    "TruncatedWarning",
     "Writer",
     "validate_columns",
 ]
 
 BLOCK_SIZE: int
+
+class TruncatedWarning(UserWarning):
+    """A BGZF file ends without its end-of-file marker, so it may be truncated."""
 
 @final
 class IndexKind:

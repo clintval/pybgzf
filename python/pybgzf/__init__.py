@@ -6,6 +6,7 @@ from pybgzf._columns import INFER
 from pybgzf._columns import Columns
 from pybgzf._columns import Infer
 from pybgzf._columns import LineFormat
+from pybgzf._pybgzf import TruncatedWarning
 from pybgzf._reader import BgzfReader
 from pybgzf._reader import IndexedReader
 from pybgzf._reader import ReadableBinary
@@ -27,6 +28,7 @@ __all__ = [
     "Infer",
     "LineFormat",
     "ReadableBinary",
+    "TruncatedWarning",
     "WritableBinary",
     "reader",
     "writer",

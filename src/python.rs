@@ -8,18 +8,37 @@ use std::path::{Path, PathBuf};
 use std::thread;
 
 use pyo3::buffer::PyBuffer;
-use pyo3::exceptions::{PyOSError, PyValueError};
+use pyo3::exceptions::{PyOSError, PyUserWarning, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyString, PyType};
 
 use crate::columns::{Columns, Kind};
-use crate::reader::{AnyIndex, BgzfReader, IndexedReader as CoreIndexedReader, Query, QueryError};
+use crate::reader::{
+    AnyIndex, BgzfReader, IndexedReader as CoreIndexedReader, Query, QueryError,
+    ends_with_eof_marker,
+};
 use crate::sniff;
 use crate::writer::{
     Error, IndexFormat, IndexOptions, Writer as CoreWriter, check_options, csi_format,
 };
 
 const FILE_BUFFER: usize = 256 * 1024;
+
+pyo3::create_exception!(
+    pybgzf,
+    TruncatedWarning,
+    PyUserWarning,
+    "A BGZF file ends without its end-of-file marker, so it may be truncated at a block boundary."
+);
+
+/// Warns that the BGZF data from `path`, or from a stream, may be truncated.
+fn warn_truncated(py: Python<'_>, path: Option<&Path>) -> PyResult<()> {
+    let data = path.map_or_else(|| "BGZF data".to_owned(), |path| path.display().to_string());
+    let message = format!("{data} ends without an end-of-file marker and may be truncated");
+    let message =
+        std::ffi::CString::new(message).map_err(|e| PyValueError::new_err(e.to_string()))?;
+    PyErr::warn(py, &py.get_type::<TruncatedWarning>(), &message, 1)
+}
 
 type ColumnsTuple = (i64, i64, Option<i64>, bool, String, i64, LineKind);
 
@@ -509,6 +528,9 @@ impl Reader {
         let n = py
             .detach(|| inner.read_full(&mut buf))
             .map_err(|e| path_error(e, path))?;
+        if inner.take_missing_eof_marker() {
+            warn_truncated(py, path)?;
+        }
         Ok(PyBytes::new(py, &buf[..n]))
     }
 
@@ -518,6 +540,9 @@ impl Reader {
         let mut buf = Vec::new();
         py.detach(|| inner.read_to_end(&mut buf))
             .map_err(|e| path_error(e, path))?;
+        if inner.take_missing_eof_marker() {
+            warn_truncated(py, path)?;
+        }
         Ok(PyBytes::new(py, &buf))
     }
 
@@ -527,6 +552,9 @@ impl Reader {
         let mut line = Vec::new();
         py.detach(|| inner.read_line(&mut line))
             .map_err(|e| path_error(e, path))?;
+        if inner.take_missing_eof_marker() {
+            warn_truncated(py, path)?;
+        }
         Ok(PyBytes::new(py, &line))
     }
 
@@ -603,6 +631,12 @@ impl IndexedReader {
                 }
                 _ => path_error(error, Some(&path)),
             })?;
+        if !py
+            .detach(|| ends_with_eof_marker(&path))
+            .map_err(|error| path_error(error, Some(&path)))?
+        {
+            warn_truncated(py, Some(&path))?;
+        }
         Ok(Self {
             inner: Some(inner),
             path,
@@ -722,5 +756,9 @@ fn _pybgzf(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<LineKind>()?;
     module.add_function(wrap_pyfunction!(validate_columns, module)?)?;
     module.add("BLOCK_SIZE", crate::block::BLOCK_SIZE)?;
+    module.add(
+        "TruncatedWarning",
+        module.py().get_type::<TruncatedWarning>(),
+    )?;
     Ok(())
 }
