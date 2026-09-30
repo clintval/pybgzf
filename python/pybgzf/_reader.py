@@ -4,6 +4,7 @@ import codecs
 import errno
 import io
 import os
+import threading
 from collections.abc import Iterator
 from types import TracebackType
 from typing import Protocol
@@ -36,6 +37,7 @@ class BgzfReader(io.RawIOBase):
     `tell()` returns one and `seek()` accepts one, but `seekable()` is False because virtual
     offsets cannot be added to or subtracted from like byte offsets.
     Data that ends without the BGZF end-of-file marker is read, with a `TruncatedWarning`.
+    Threads sharing a reader take turns, as with the standard library's buffered files.
 
     Args:
         src: A path to open, or a readable binary file-like object such as a pipe.
@@ -49,6 +51,7 @@ class BgzfReader(io.RawIOBase):
 
     def __init__(self, src: str | os.PathLike[str] | ReadableBinary, *, threads: int = 1) -> None:
         super().__init__()
+        self._closing: threading.RLock = threading.RLock()
         if isinstance(src, (str, os.PathLike)):
             source: str | ReadableBinary = os.fspath(src)
             self._name: object = source
@@ -116,14 +119,15 @@ class BgzfReader(io.RawIOBase):
         With more than one thread, a pipe or file-like source may be read from once more in the
         background after this returns, if a read was already waiting for data.
         """
-        if self.closed:
-            return
-        inner: _pybgzf.Reader | None = getattr(self, "_inner", None)
-        try:
-            if inner is not None:
-                inner.close()
-        finally:
-            super().close()
+        with self._closing:
+            if self.closed:
+                return
+            inner: _pybgzf.Reader | None = getattr(self, "_inner", None)
+            try:
+                if inner is not None:
+                    inner.close()
+            finally:
+                super().close()
 
 
 def reader(
@@ -154,6 +158,7 @@ class IndexedReader:
     Lines are parsed with the columns and header character recorded in the index, and a query
     returns what `tabix path ref:start+1-end` prints, in the same order.
     A file that ends without the BGZF end-of-file marker warns with `TruncatedWarning` when opened.
+    Threads may share a reader and its queries, which take turns reading.
 
     Args:
         path: The BGZF file.
