@@ -9,12 +9,13 @@ use indexmap::{IndexMap, IndexSet};
 use noodles_bgzf::VirtualPosition;
 use noodles_csi::binning_index::index::header::format::CoordinateSystem;
 use noodles_csi::binning_index::index::header::{Format, Header};
+use noodles_csi::binning_index::index::reference_sequence::Bin;
 use noodles_csi::binning_index::index::reference_sequence::bin::Chunk;
 use noodles_csi::binning_index::index::reference_sequence::index::{BinnedIndex, LinearIndex};
-use noodles_csi::binning_index::index::reference_sequence::{Bin, Metadata};
 use noodles_csi::binning_index::index::{Index, ReferenceSequence};
 
 use crate::columns::Kind;
+use crate::khash::KhashOrder;
 
 const MIN_MARKER_DISTANCE: u64 = 0x10000;
 const UNSET: u64 = u64::MAX;
@@ -64,13 +65,22 @@ pub fn reg2bin(beg: i64, end: i64, min_shift: u32, depth: u32) -> u32 {
 #[derive(Default)]
 struct Reference {
     bins: HashMap<u32, Vec<(u64, u64)>>,
+    order: KhashOrder,
     linear: Vec<u64>,
     metadata: Option<(u64, u64, u64)>,
 }
 
 impl Reference {
     fn add_chunk(&mut self, bin: u32, start: u64, end: u64) {
+        self.order.put(bin);
         self.bins.entry(bin).or_default().push((start, end));
+    }
+
+    fn set_metadata(&mut self, depth: u32, start: u64, end: u64, count: u64) {
+        let id = metadata_bin(depth);
+        self.order.put(id);
+        self.order.put(id);
+        self.metadata = Some((start, end, count));
     }
 
     fn add_to_linear_index(&mut self, beg: i64, end: i64, offset: u64, min_shift: u32) {
@@ -187,8 +197,12 @@ impl IndexBuilder {
             if let (Some(save_tid), Some(save_bin)) = (self.save_tid, self.save_bin) {
                 self.references[save_tid].add_chunk(save_bin, self.save_offset, self.last_offset);
                 if self.last_bin.is_none() {
-                    self.references[save_tid].metadata =
-                        Some((self.first_offset, self.last_offset, self.record_count));
+                    self.references[save_tid].set_metadata(
+                        self.depth,
+                        self.first_offset,
+                        self.last_offset,
+                        self.record_count,
+                    );
                     self.record_count = 0;
                     self.first_offset = self.last_offset;
                 }
@@ -207,8 +221,12 @@ impl IndexBuilder {
     fn finish(mut self, final_offset: u64) -> (u32, u32, Vec<Reference>) {
         if let (Some(tid), Some(bin)) = (self.save_tid, self.save_bin) {
             self.references[tid].add_chunk(bin, self.save_offset, final_offset);
-            self.references[tid].metadata =
-                Some((self.first_offset, final_offset, self.record_count));
+            self.references[tid].set_metadata(
+                self.depth,
+                self.first_offset,
+                final_offset,
+                self.record_count,
+            );
         }
         for reference in &mut self.references {
             reference.backfill_linear_index();
@@ -267,12 +285,24 @@ fn chunks(pairs: &[(u64, u64)]) -> Vec<Chunk> {
         .collect()
 }
 
-fn metadata(reference: &Reference) -> Option<Metadata> {
-    reference
-        .metadata
-        .map(|(start, end, count)| Metadata::new(vpos(start), vpos(end), count, 0))
+fn metadata_bin(depth: u32) -> u32 {
+    bin_first(depth + 1) + 1
 }
 
+/// Returns the bins, and the metadata pseudo-bin, in the order htslib writes them.
+fn ordered_bins(reference: &Reference, depth: u32) -> Vec<(u32, Vec<(u64, u64)>)> {
+    let metadata_id = metadata_bin(depth);
+    reference
+        .order
+        .keys()
+        .filter_map(|id| match (id == metadata_id, reference.metadata) {
+            (true, Some((start, end, count))) => Some((id, vec![(start, end), (count, 0)])),
+            _ => reference.bins.get(&id).map(|pairs| (id, pairs.clone())),
+        })
+        .collect()
+}
+
+#[cfg(test)]
 fn sorted_bins(reference: &Reference) -> Vec<(u32, &Vec<(u64, u64)>)> {
     let mut bins: Vec<_> = reference
         .bins
@@ -294,16 +324,16 @@ pub fn tabix(
     let references = references
         .iter()
         .map(|reference| {
-            let bins: IndexMap<usize, Bin> = sorted_bins(reference)
+            let bins: IndexMap<usize, Bin> = ordered_bins(reference, depth)
                 .into_iter()
-                .map(|(id, pairs)| (id as usize, Bin::new(chunks(pairs))))
+                .map(|(id, pairs)| (id as usize, Bin::new(chunks(&pairs))))
                 .collect();
             let linear: LinearIndex = reference
                 .linear
                 .iter()
                 .map(|&offset| vpos(offset))
                 .collect();
-            ReferenceSequence::new(bins, linear, metadata(reference))
+            ReferenceSequence::new(bins, linear, None)
         })
         .collect();
     Index::builder()
@@ -329,17 +359,17 @@ pub fn csi(
         .map(|reference| {
             let mut bins = IndexMap::new();
             let mut offsets = BinnedIndex::new();
-            for (id, pairs) in sorted_bins(reference) {
-                let bottom = bin_bottom(id, depth);
+            for (id, pairs) in ordered_bins(reference, depth) {
                 let offset = if id < bin_count {
+                    let bottom = bin_bottom(id, depth);
                     reference.linear.get(bottom).copied().unwrap_or(0)
                 } else {
                     0
                 };
-                bins.insert(id as usize, Bin::new(chunks(pairs)));
+                bins.insert(id as usize, Bin::new(chunks(&pairs)));
                 offsets.insert(id as usize, vpos(offset));
             }
-            ReferenceSequence::new(bins, offsets, metadata(reference))
+            ReferenceSequence::new(bins, offsets, None)
         })
         .collect();
     Index::builder()

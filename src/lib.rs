@@ -3,6 +3,7 @@
 pub mod block;
 pub mod columns;
 pub mod index;
+pub mod khash;
 pub mod sniff;
 pub mod writer;
 

@@ -54,11 +54,17 @@ def htslib_index(path: Path, index: IndexFormat, *args: str) -> Path:
     return Path(f"{copy}.{index.value}")
 
 
+def assert_identical(ours: Path, theirs: Path) -> None:
+    """Assert two indexes are the same, first as parsed values and then byte for byte."""
+    assert read_index(ours) == read_index(theirs)
+    assert gzip.decompress(ours.read_bytes()) == gzip.decompress(theirs.read_bytes())
+
+
 def assert_same_index(
     path: Path, text: str, index: IndexFormat, columns: Columns, *args: str
 ) -> None:
     ours = write(path, text, index, columns)
-    assert read_index(ours) == read_index(htslib_index(path, index, *args))
+    assert_identical(ours, htslib_index(path, index, *args))
 
 
 @pytest.mark.parametrize("index", [TBI, CSI])
@@ -66,7 +72,7 @@ def assert_same_index(
 def test_bed(tmp_path: Path, index: IndexFormat, threads: int) -> None:
     path = tmp_path / "a.bed.gz"
     ours = write(path, bed_text(), index, Columns.BED, threads=threads)
-    assert read_index(ours) == read_index(htslib_index(path, index, "-p", "bed"))
+    assert_identical(ours, htslib_index(path, index, "-p", "bed"))
 
 
 def test_decompressed_tabix_index_is_byte_identical(tmp_path: Path) -> None:
@@ -79,7 +85,7 @@ def test_decompressed_tabix_index_is_byte_identical(tmp_path: Path) -> None:
 def test_csi_min_shift(tmp_path: Path) -> None:
     path = tmp_path / "a.bed.gz"
     ours = write(path, bed_text(), CSI, Columns.BED, csi_min_shift=12)
-    assert read_index(ours) == read_index(htslib_index(path, CSI, "-p", "bed", "-m", "12"))
+    assert_identical(ours, htslib_index(path, CSI, "-p", "bed", "-m", "12"))
 
 
 def test_decompresses_with_bgzip(tmp_path: Path) -> None:
@@ -224,7 +230,7 @@ def test_lines_ending_on_block_boundaries(tmp_path: Path) -> None:
     for threads in (1, 3):
         path = tmp_path / f"b{threads}.bed.gz"
         ours = write(path, "".join(lines), TBI, Columns.BED, threads=threads, chunk=64)
-        assert read_index(ours) == read_index(htslib_index(path, TBI, "-p", "bed"))
+        assert_identical(ours, htslib_index(path, TBI, "-p", "bed"))
 
 
 def test_flushes_between_lines(tmp_path: Path) -> None:
@@ -235,7 +241,7 @@ def test_flushes_between_lines(tmp_path: Path) -> None:
             if number % 997 == 0:
                 writer.flush()
     ours = Path(f"{path}.tbi")
-    assert read_index(ours) == read_index(htslib_index(path, TBI, "-p", "bed"))
+    assert_identical(ours, htslib_index(path, TBI, "-p", "bed"))
 
 
 @requires_htslib_1_23
