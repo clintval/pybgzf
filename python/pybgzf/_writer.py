@@ -176,11 +176,12 @@ class BgzfWriter(io.RawIOBase):
     @override
     def flush(self) -> None:
         """End the current BGZF block and flush everything written so far."""
-        if self._inner.closed:
+        inner: _pybgzf.Writer | None = getattr(self, "_inner", None)
+        if inner is None or inner.closed:
             if self.closed:
                 raise ValueError("I/O operation on closed file.")
             return
-        self._inner.flush()
+        inner.flush()
 
     @override
     def tell(self) -> int:
