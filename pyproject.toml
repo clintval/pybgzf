@@ -34,6 +34,7 @@ classifiers = [
 [dependency-groups]
 dev = [
     "basedpyright ~=1.40",
+    "hypothesis ~=6.168",
     "maturin ~=1.15",
     "mypy ~=2.3",
     "poethepoet ~=0.48",

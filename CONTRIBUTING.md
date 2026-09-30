@@ -21,6 +21,7 @@ cargo test --no-default-features
 
 Tests that compare output against htslib run only when `bgzip` and `tabix` are on the `PATH`, for example after `brew install htslib` or `sudo apt-get install tabix`.
 The VCF comparisons also need htslib 1.23 or newer, whose rules for the end of a VCF record `pybgzf` follows.
+The randomized comparisons draw new files with [Hypothesis](https://hypothesis.readthedocs.io) on every run, except when `CI` is set, where they draw the same files each time.
 
 ## Fuzzing
 

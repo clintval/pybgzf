@@ -1,13 +1,22 @@
 """Compare output with htslib's `bgzip` and `tabix`, which index the same compressed bytes."""
 
+import bisect
 import gzip
+import itertools
 import random
 import shutil
+import struct
 import subprocess
+import tempfile
+from collections.abc import Callable
 from pathlib import Path
 
 import pybgzf
 import pytest
+from hypothesis import HealthCheck
+from hypothesis import given
+from hypothesis import settings
+from hypothesis import strategies as st
 from pybgzf import INFER
 from pybgzf import BgzfWriter
 from pybgzf import Columns
@@ -15,6 +24,7 @@ from pybgzf import IndexFormat
 
 from tests.helpers import bed_lines
 from tests.helpers import bed_text
+from tests.helpers import htslib_version
 from tests.helpers import requires_htslib
 from tests.helpers import requires_htslib_1_23
 from tests.helpers import tabix
@@ -388,3 +398,236 @@ def test_the_tabix_limit_matches_tabix(tmp_path: Path) -> None:
     with BgzfWriter(tmp_path / "over.bed.gz", index=TBI, columns=Columns.BED) as writer:
         with pytest.raises(ValueError, match="beyond the tabix limit"):
             writer.write(b"chr1\t1\t536870913\n")
+
+
+TABIX_SKIPS_COMMENTS = htslib_version() >= (1, 23)
+SYMBOLIC = ["<DEL>", "<DUP>", "<DUP:TANDEM>", "<INV>", "<CNV>", "<INS>", "<*>", "<NON_REF>"]
+
+Place = Callable[[str, int], str]
+
+
+@st.composite
+def reference_positions(draw: st.DrawFn, limit: int) -> list[int]:
+    """Sorted positions from a reference start, a bin edge, or halfway to `limit`."""
+    first = draw(st.sampled_from([0, 1, 5_000, 16_384, limit // 2]))
+    step = st.one_of(st.integers(0, 3_000), st.sampled_from([0, 16_384, 1 << 16]))
+    steps = draw(st.lists(step, min_size=1, max_size=20))
+    count = draw(st.integers(1_000, 3_000))
+    return list(
+        itertools.accumulate(itertools.islice(itertools.cycle(steps), count), initial=first)
+    )
+
+
+@st.composite
+def placed_lines(draw: st.DrawFn, lines: st.SearchStrategy[Place], limit: int) -> list[str]:
+    """Lines drawn from `lines` and placed, in turn, on three references."""
+    places = draw(st.lists(lines, min_size=4, max_size=20))
+    return [
+        place(name, position)
+        for name in ["chr1", "chr2", "chr10"]
+        for position, place in zip(
+            draw(reference_positions(limit)), itertools.cycle(places), strict=False
+        )
+    ]
+
+
+@st.composite
+def vcf_line(draw: st.DrawFn) -> Place:
+    """A VCF record ending at its REF, END, SVLEN, or FORMAT LEN, to be placed."""
+    ref = draw(st.text("ACGT", min_size=1, max_size=60))
+    alleles = draw(st.lists(st.sampled_from(["A", "T", ".", *SYMBOLIC]), min_size=1, max_size=3))
+    info = draw(st.lists(st.sampled_from(["SVTYPE=DEL", "XEND=9", "CIEND=-5,5"]), max_size=2))
+    if draw(st.booleans()):
+        lengths = st.one_of(st.just("."), st.integers(-200_000, 200_000).map(str))
+        info.append(f"SVLEN={','.join(draw(st.lists(lengths, min_size=1, max_size=3)))}")
+    end = draw(st.one_of(st.none(), st.just("."), st.integers(-5, 200_000).map(str)))
+    at = draw(st.integers(0, len(info)))
+    keys = draw(st.sampled_from(["GT", "GT:LEN", "LEN:GT"]))
+    length = st.one_of(st.just("."), st.integers(-5, 20_000).map(str))
+    samples = [
+        ":".join(draw(length) if key == "LEN" else "0/1" for key in keys.split(":"))
+        for _ in range(2)
+    ]
+
+    def place(name: str, position: int) -> str:
+        entries = list(info)
+        if end is not None:
+            entries.insert(at, f"END={end if end == '.' else position + int(end)}")
+        fields = [name, str(position), ".", ref, ",".join(alleles), ".", "PASS"]
+        return "\t".join([*fields, ";".join(entries) or ".", keys, *samples]) + "\n"
+
+    return place
+
+
+@st.composite
+def vcf_file(draw: st.DrawFn, limit: int) -> str:
+    """A VCF with SNVs, indels, symbolic alleles, and gVCF blocks on three contigs."""
+    lines = draw(placed_lines(vcf_line(), limit))
+    longest = max(int(line.split("\t")[1]) for line in lines) + 1_000_000
+    header = ["##fileformat=VCFv4.3\n"]
+    header += [f"##contig=<ID={name},length={longest}>\n" for name in ["chr1", "chr2", "chr10"]]
+    header.append("#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tS1\tS2\n")
+    return "".join(header + lines)
+
+
+CIGAR_OPERATIONS = st.one_of(
+    st.builds("{}{}".format, st.integers(1, 150), st.sampled_from("MIDSH=X")),
+    st.builds("{}N".format, st.integers(50, 200_000)),
+)
+CIGARS = st.one_of(st.just("*"), st.lists(CIGAR_OPERATIONS, min_size=1, max_size=6).map("".join))
+
+
+@st.composite
+def sam_line(draw: st.DrawFn) -> Place:
+    """A SAM record, spliced, clipped, or unmapped, to be placed."""
+    flag = draw(st.sampled_from([0, 16, 99, 147, 4, 69, 133]))
+    cigar = "*" if flag & 4 else draw(CIGARS)
+
+    def place(name: str, position: int) -> str:
+        return f"r\t{flag}\t{name}\t{position}\t60\t{cigar}\t*\t0\t0\tACGT\tIIII\n"
+
+    return place
+
+
+@st.composite
+def sam_file(draw: st.DrawFn, limit: int) -> str:
+    """A SAM with spliced, clipped, and unmapped reads, and unplaced reads at the end."""
+    lines = ["@HD\tVN:1.6\tSO:coordinate\n"]
+    lines += [f"@SQ\tSN:{name}\tLN:{limit}\n" for name in ["chr1", "chr2", "chr10"]]
+    lines += draw(placed_lines(sam_line(), limit))
+    lines += ["u\t4\t*\t0\t0\t*\t*\t0\t0\tA\tI\n"] * draw(st.integers(0, 30))
+    return "".join(lines)
+
+
+@st.composite
+def gff_line(draw: st.DrawFn) -> Place:
+    """A GFF3 feature up to 400 kb wide, to be placed, and maybe a comment after it."""
+    kind = draw(st.sampled_from(["gene", "exon", "CDS"]))
+    strand = draw(st.sampled_from("+-."))
+    width = draw(
+        st.one_of(st.sampled_from([0, 1, 10, 300, 5_000, 400_000]), st.integers(0, 400_000))
+    )
+    comment = draw(st.sampled_from(["", "###\n", "# a comment\n"])) if TABIX_SKIPS_COMMENTS else ""
+
+    def place(name: str, position: int) -> str:
+        fields = [name, "src", kind, str(position + 1), str(position + width), ".", strand, "."]
+        return "\t".join([*fields, "ID=f"]) + "\n" + comment
+
+    return place
+
+
+@st.composite
+def gff_file(draw: st.DrawFn, limit: int) -> str:
+    """A GFF3 with features up to 400 kb wide, and comments between them if tabix skips them."""
+    return "##gff-version 3\n" + "".join(draw(placed_lines(gff_line(), limit)))
+
+
+def uncompressed_block_starts(path: Path) -> list[int]:
+    """Return the uncompressed offset at which every BGZF block of `path` starts."""
+    data = path.read_bytes()
+    starts: list[int] = []
+    at = total = 0
+    while at < len(data):
+        starts.append(total)
+        at += struct.unpack_from("<H", data, at + 16)[0] + 1
+        total += struct.unpack_from("<I", data, at - 4)[0]
+    return starts
+
+
+def data_lines(text: str, columns: Columns) -> list[tuple[int, str, int]]:
+    """Return each data line's offset, reference name, and 0-based start."""
+    found: list[tuple[int, str, int]] = []
+    offset = 0
+    for line in text.splitlines(keepends=True):
+        if not line.startswith(columns.meta_char):
+            fields = line.split("\t")
+            start = int(fields[columns.start - 1]) - (0 if columns.zero_based else 1)
+            found.append((offset, fields[columns.refname - 1], max(start, 0)))
+        offset += len(line)
+    return found
+
+
+@st.composite
+def query_regions(
+    draw: st.DrawFn, rows: list[tuple[int, str, int]], blocks: list[int]
+) -> list[tuple[str, int, int]]:
+    """Regions at reference starts and ends, block boundaries, and random lines."""
+    last = {name: start for _, name, start in rows}
+    offsets = [offset for offset, _, _ in rows]
+    anchors = [(name, 0) for name in last] + [(name, start + 1) for name, start in last.items()]
+    for block in blocks[1:]:
+        at = max(bisect.bisect_right(offsets, block) - 1, 0)
+        anchors += [(name, start) for _, name, start in rows[at : at + 2]]
+    nudges = st.one_of(st.sampled_from([-1, 0, 1]), st.integers(2, 1_000))
+    for _, name, start in draw(st.lists(st.sampled_from(rows), min_size=100, max_size=300)):
+        anchors.append((name, max(start + draw(nudges), 0)))
+    found = [(name, start, 1 << 40) for name, start in last.items()]
+    found += [("chrUn", 0, 1 << 29), ("CHR1", 0, 1 << 29), ("chr", 0, 100)]
+    widths = st.sampled_from([0, 1, 2, 100, 16_384, 1_000_000])
+    for name, position in anchors:
+        width = draw(widths)
+        found += [(name, position, position + width), (name, max(position - width, 0), position)]
+    return draw(st.permutations(found))
+
+
+def assert_queries_match_tabix(
+    path: Path, readers: list[pybgzf.IndexedReader], regions: list[tuple[str, int, int]]
+) -> None:
+    """Query all regions with one tabix call, and region by region only to report a difference.
+
+    Tabix reads `ref:1-0` as the whole reference, so regions ending at 0 must be empty instead.
+    """
+    empty = [region for region in regions if region[2] == 0]
+    queried = [region for region in regions if region[2] > 0]
+    arguments = [f"{name}:{start + 1}-{end}" for name, start, end in queried]
+    expected = tabix(path, *arguments).splitlines()
+    for reader in readers:
+        assert not any(list(reader.query(*region)) for region in empty)
+        found = [line for name, start, end in queried for line in reader.query(name, start, end)]
+        if found != expected:
+            for (name, start, end), argument in zip(queried, arguments, strict=True):
+                lines = list(reader.query(name, start, end))
+                assert lines == tabix(path, argument).splitlines(), argument
+        assert found == expected
+
+
+RANDOM_FILES = {
+    "vcf": (vcf_file, Columns.VCF),
+    "sam": (sam_file, Columns.SAM),
+    "gff": (gff_file, Columns.GFF),
+}
+
+
+@pytest.mark.parametrize("index", [TBI, CSI])
+@pytest.mark.parametrize("preset", [pytest.param("vcf", marks=requires_htslib_1_23), "sam", "gff"])
+@settings(max_examples=10, deadline=None, suppress_health_check=[HealthCheck.too_slow])
+@given(data=st.data())
+def test_random_files_index_and_query_like_tabix(
+    preset: str, index: IndexFormat, data: st.DataObject
+) -> None:
+    generate, columns = RANDOM_FILES[preset]
+    text = data.draw(generate(1 << 29 if index is TBI else 1 << 31), label="text")
+    sizes = data.draw(
+        st.lists(st.sampled_from([1, 7, 1000, 65280, 300_000]), min_size=1), label="sizes"
+    )
+    threads = data.draw(st.sampled_from([1, 3]), label="threads")
+    with tempfile.TemporaryDirectory() as directory:
+        path = Path(directory) / f"r.{preset}.gz"
+        with pybgzf.writer(path, threads=threads, index=index, columns=columns) as handle:
+            at = 0
+            for size in itertools.cycle(sizes):
+                if at >= len(text):
+                    break
+                handle.write(text[at : at + size])
+                at += size
+        ours = Path(f"{path}.{index.name.lower()}")
+        theirs = htslib_index(path, index, "-p", preset)
+        assert_identical(ours, theirs)
+        blocks = uncompressed_block_starts(path)
+        assert len(blocks) > 1
+        found = data.draw(query_regions(data_lines(text, columns), blocks), label="regions")
+        with (
+            pybgzf.IndexedReader(path, index_path=ours) as first,
+            pybgzf.IndexedReader(path, index_path=theirs, threads=3) as second,
+        ):
+            assert_queries_match_tabix(theirs.parent / path.name, [first, second], found)
