@@ -31,6 +31,7 @@ noodles-tabix = "0.67"
 pyo3 = { version = "0.29", features = ["abi3-py311"], optional = true }
 
 [dev-dependencies]
+proptest = { version = "1.11", default-features = false, features = ["std"] }
 tempfile = "3"
 
 [lints.clippy]
