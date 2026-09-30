@@ -481,11 +481,12 @@ impl Reader {
         Ok(PyBytes::new(py, &buf))
     }
 
-    /// Reads through the next newline.
-    fn readline<'py>(&mut self, py: Python<'py>) -> PyResult<Bound<'py, PyBytes>> {
+    /// Reads through the next newline, or at most `size` bytes when `size` is not negative.
+    fn readline<'py>(&mut self, py: Python<'py>, size: i64) -> PyResult<Bound<'py, PyBytes>> {
         let (inner, path) = self.inner()?;
+        let limit = u64::try_from(size).unwrap_or(u64::MAX);
         let mut line = Vec::new();
-        py.detach(|| inner.read_until(b'\n', &mut line))
+        py.detach(|| (&mut *inner).take(limit).read_until(b'\n', &mut line))
             .map_err(|e| path_error(e, path))?;
         if inner.take_missing_eof_marker() {
             warn_truncated(py, path)?;

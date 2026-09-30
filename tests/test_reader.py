@@ -74,13 +74,20 @@ def test_small_reads_and_readinto(data_dir: Path) -> None:
     assert b"".join(chunks) == expected
 
 
-def test_readline_and_iteration(data_dir: Path, lines: list[str]) -> None:
+@pytest.mark.parametrize("threads", [1, 3])
+def test_readline_and_iteration(data_dir: Path, lines: list[str], threads: int) -> None:
     path = bed_path(data_dir, IndexFormat.TBI)
-    with BgzfReader(path) as reader:
+    with BgzfReader(path, threads=threads) as reader:
         assert reader.readline() == b"#chrom\tstart\tend\tname\tscore\n"
+        assert reader.readline(0) == b""
         assert reader.readline(4) == b"chr1"
         assert reader.readline() == lines[0].encode()[4:]
         assert next(iter(reader)) == lines[1].encode()
+        pieces = [lines[0].encode(), lines[1].encode()]
+        while piece := reader.readline(1000):
+            assert len(piece) <= 1000 and b"\n" not in piece[:-1]
+            pieces.append(piece)
+    assert b"".join(pieces) == "".join(lines).encode()
 
 
 def test_tell_and_seek_use_virtual_offsets(data_dir: Path) -> None:
