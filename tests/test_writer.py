@@ -286,7 +286,7 @@ def test_bad_lines_are_value_errors(tmp_path: Path) -> None:
         with pytest.raises(ValueError, match=r"line 1: column 2 is not an integer"):
             writer.write(b"chr1\tone\t2\n")
     with BgzfWriter(tmp_path / "b.bed.gz", index=IndexFormat.TBI, columns=Columns.BED) as writer:
-        with pytest.raises(ValueError, match=r"line 1: the end 5 is before the start 11"):
+        with pytest.raises(ValueError, match=r"line 1: the end 5 is before the start 10"):
             writer.write(b"chr1\t10\t5\n")
 
 

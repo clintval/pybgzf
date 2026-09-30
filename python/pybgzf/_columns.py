@@ -43,6 +43,8 @@ INFER: Final = Infer.INFER
 class Columns:
     """Where each line keeps its reference name, start, and end, like `tabix -s -b -e -0 -c -S`.
 
+    Positions are read as base-10 integers, so, unlike in tabix, `010` is 10 and `0x10` is 0.
+
     Attributes:
         refname: The 1-based column holding the reference name.
         start: The 1-based column holding the start position.

@@ -15,7 +15,7 @@ use std::thread::{self, JoinHandle};
 use bgzf::{BgzfError, CompressionLevel, Compressor};
 use crossbeam_channel::{Receiver, Sender, TryRecvError, bounded};
 
-/// The number of uncompressed bytes in every block except the last one, as in `bgzip`.
+/// The number of uncompressed bytes in a full block, as in `bgzip`; flushing ends a block early.
 pub const BLOCK_SIZE: usize = bgzf::BGZF_BLOCK_SIZE;
 
 /// The position of a byte as a block number and an offset into that block's uncompressed data.

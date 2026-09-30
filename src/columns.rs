@@ -204,8 +204,9 @@ fn finish(name: Option<&[u8]>, beg: i64, end: i64, columns: usize) -> Result<Int
     }
 }
 
-/// Parses the leading integer of `bytes` like C's `strtoll` in base 10, returning the value
-/// and the number of bytes consumed, or `None` when there are no digits.
+/// Parses the leading base-10 integer of `bytes`, saturating, after optional whitespace and
+/// sign, returning the value and the number of bytes consumed, or `None` without digits.
+/// Unlike htslib, which calls `strtoll` in base 0, a leading `0` or `0x` is not octal or hex.
 fn integer_prefix(bytes: &[u8]) -> Option<(i64, usize)> {
     let mut i = bytes.iter().take_while(|b| b.is_ascii_whitespace()).count();
     let negative = match bytes.get(i) {

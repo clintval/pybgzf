@@ -79,7 +79,8 @@ class BgzfWriter(io.RawIOBase):
             `INFER` infers them from the file name, or else from the content as it streams; a
             BED file whose first data line has two fields is BED2.
             Without `index`, columns are not used.
-        csi_min_shift: The width, as a power of two, of the smallest CSI bin.
+        csi_min_shift: The width, as a power of two, of the smallest CSI bin; a small one with long
+            features makes a large index, as in htslib.
         csi_depth: The number of CSI bin levels; None chooses as `tabix -C` does.
 
     Raises:

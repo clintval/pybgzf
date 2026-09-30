@@ -284,17 +284,17 @@ impl Indexer {
             tid
         } else if self.names.contains(name) {
             return Err(format!(
-                "line {number}: records for {:?} are not contiguous; each reference must appear in one block",
+                "line {number}: records for {:?} are not contiguous; the lines of each reference must form one contiguous run",
                 String::from_utf8_lossy(name),
             ));
         } else {
             self.names.insert_full(name.to_vec()).0
         };
         if interval.end < interval.beg {
+            let start = interval.beg + i64::from(!columns.zero_based);
             return Err(format!(
-                "line {number}: the end {} is before the start {}",
-                interval.end,
-                interval.beg + 1
+                "line {number}: the end {} is before the start {start}",
+                interval.end
             ));
         }
         self.bins = Some((min_shift, depth));
