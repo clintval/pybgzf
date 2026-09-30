@@ -111,6 +111,11 @@ impl<R: Read + Seek + Send + 'static> BgzfReader<R> {
         Ok(filled)
     }
 
+    /// Returns true if blocks are read ahead on another thread, which may be waiting for data.
+    pub fn reads_ahead(&self) -> bool {
+        matches!(self.inner, Inner::Parallel(_))
+    }
+
     /// Stops any worker threads and returns the source.
     pub fn finish(self) -> io::Result<R> {
         match self.inner {

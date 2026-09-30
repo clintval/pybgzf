@@ -359,3 +359,34 @@ def test_queries_reach_the_last_position_an_index_holds(tmp_path: Path, index: I
         assert list(reader.query("chr1", 536870911, 536870912)) == [last]
         assert list(reader.query("chr1", 536870900, 10**12)) == [last]
         assert list(reader.query("chr1", 536870912, 10**12)) == []
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="named pipes are not available")
+@pytest.mark.parametrize("from_path", [True, False], ids=["path", "file-like"])
+def test_close_returns_while_a_pipe_writer_is_idle(
+    tmp_path: Path, data_dir: Path, from_path: bool
+) -> None:
+    compressed = bed_path(data_dir, IndexFormat.TBI).read_bytes()[:40_000]
+    fifo = tmp_path / "fifo"
+    os.mkfifo(fifo)
+    ready = threading.Event()
+
+    def feed() -> None:
+        with fifo.open("wb") as pipe:
+            pipe.write(compressed)
+            pipe.flush()
+            ready.wait()
+
+    feeder = threading.Thread(target=feed)
+    feeder.start()
+    with fifo.open("rb") as pipe:
+        reader = BgzfReader(fifo if from_path else pipe, threads=2)
+        assert len(reader.read(10)) == 10
+        closer = threading.Thread(target=reader.close)
+        closer.start()
+        closer.join(timeout=5)
+        closed = not closer.is_alive()
+        ready.set()
+        closer.join()
+    feeder.join()
+    assert closed

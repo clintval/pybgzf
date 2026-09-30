@@ -5,6 +5,7 @@ use std::fs::File;
 use std::io::{self, BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::num::NonZero;
 use std::path::PathBuf;
+use std::thread;
 
 use pyo3::buffer::PyBuffer;
 use pyo3::exceptions::PyValueError;
@@ -348,10 +349,21 @@ fn drop_detached<T: Send>(py: Python<'_>, value: T) {
     py.detach(move || drop(value));
 }
 
+/// Stops a reader's threads, in the background when its source may block, such as a pipe whose
+/// writer is idle, so that closing never waits on a read that may not return.
+fn release(py: Python<'_>, reader: BgzfReader<Source>, may_block: bool) {
+    if may_block && reader.reads_ahead() {
+        py.detach(|| drop(thread::Builder::new().spawn(move || drop(reader))));
+    } else {
+        drop_detached(py, reader);
+    }
+}
+
 /// The Rust half of `pybgzf.BgzfReader`.
 #[pyclass(module = "pybgzf._pybgzf")]
 struct Reader {
     inner: Option<BgzfReader<Source>>,
+    may_block: bool,
 }
 
 impl Reader {
@@ -366,24 +378,23 @@ impl Reader {
     #[pyo3(signature = (src, *, threads))]
     fn new(py: Python<'_>, src: &Bound<'_, PyAny>, threads: i64) -> PyResult<Self> {
         let threads = self::threads(threads)?;
-        let source = if src.is_instance_of::<PyString>() {
+        let (source, may_block) = if src.is_instance_of::<PyString>() {
             let path: PathBuf = src.extract()?;
-            Source::File(BufReader::with_capacity(
-                FILE_BUFFER,
-                File::open(path).map_err(io_to_python)?,
-            ))
+            let file = File::open(path).map_err(io_to_python)?;
+            let regular = file.metadata().map_err(io_to_python)?.is_file();
+            let file = BufReader::with_capacity(FILE_BUFFER, file);
+            (Source::File(file), !regular)
         } else {
             let seekable = src.hasattr("seekable")? && src.call_method0("seekable")?.is_truthy()?;
-            Source::Python {
-                object: src.clone().unbind(),
-                seekable,
-            }
+            let object = src.clone().unbind();
+            (Source::Python { object, seekable }, true)
         };
         Ok(Self {
             inner: Some(
                 py.detach(|| BgzfReader::new(source, threads))
                     .map_err(io_to_python)?,
             ),
+            may_block,
         })
     }
 
@@ -432,7 +443,7 @@ impl Reader {
     /// Stops any worker threads.
     fn close(&mut self, py: Python<'_>) {
         if let Some(inner) = self.inner.take() {
-            drop_detached(py, inner);
+            release(py, inner, self.may_block);
         }
     }
 
@@ -445,7 +456,7 @@ impl Reader {
 impl Drop for Reader {
     fn drop(&mut self) {
         if let Some(inner) = self.inner.take() {
-            Python::attach(|py| drop_detached(py, inner));
+            Python::attach(|py| release(py, inner, self.may_block));
         }
     }
 }

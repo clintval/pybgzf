@@ -106,7 +106,11 @@ class BgzfReader(io.RawIOBase):
 
     @override
     def close(self) -> None:
-        """Stop any decompression threads and close the source if it was opened from a path."""
+        """Stop any decompression threads and close the source if it was opened from a path.
+
+        With more than one thread, a pipe or file-like source may be read from once more in the
+        background after this returns, if a read was already waiting for data.
+        """
         if self.closed:
             return
         inner: _pybgzf.Reader | None = getattr(self, "_inner", None)
