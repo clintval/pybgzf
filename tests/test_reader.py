@@ -149,6 +149,8 @@ def test_closed_readers_reject_io(data_dir: Path) -> None:
 def test_invalid_reader_options(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="threads"):
         BgzfReader(tmp_path / "x.gz", threads=0)
+    with pytest.raises(ValueError, match="threads must be between 1 and 1024"):
+        BgzfReader(tmp_path / "x.gz", threads=100_000)
     with pytest.raises(FileNotFoundError):
         BgzfReader(tmp_path / "missing.gz")
 
@@ -218,6 +220,8 @@ def test_query_arguments_are_checked(data_dir: Path) -> None:
     assert reader.closed
     with pytest.raises(ValueError, match="closed"):
         reader.query("chr1", 0, 1)
+    with pytest.raises(ValueError, match="threads must be between 1 and 1024"):
+        IndexedReader(bed_path(data_dir, IndexFormat.TBI), threads=100_000)
 
 
 def test_finds_the_index_next_to_the_file(tmp_path: Path, data_dir: Path) -> None:

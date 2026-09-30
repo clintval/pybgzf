@@ -332,7 +332,7 @@ impl Seek for Source {
 }
 
 fn threads(threads: usize) -> PyResult<NonZero<usize>> {
-    NonZero::new(threads).ok_or_else(|| PyValueError::new_err("threads must be at least 1"))
+    crate::check_threads(threads).map_err(PyValueError::new_err)
 }
 
 fn io_to_python(error: io::Error) -> PyErr {

@@ -64,7 +64,8 @@ class BgzfWriter(io.RawIOBase):
     Args:
         dest: A path to create, or a writable binary file-like object such as a pipe.
         level: The compression level, from 0 (stored) to 12 (smallest); 1 to 12 use libdeflate.
-        threads: The number of threads compressing blocks; 1 compresses in the calling thread.
+        threads: The number of threads compressing blocks, from 1 to 1024; 1 compresses in the
+            calling thread.
         index: The kind of index to build, or None to build none.
         index_path: Where to write the index; defaults to `dest` plus `.tbi` or `.csi`, and is
             required when `index` is set and `dest` is a file-like object.

@@ -36,11 +36,11 @@ class BgzfReader(io.RawIOBase):
 
     Args:
         src: A path to open, or a readable binary file-like object such as a pipe.
-        threads: The number of threads decompressing blocks; 1 decompresses in the calling
-            thread.
+        threads: The number of threads decompressing blocks, from 1 to 1024; 1 decompresses in
+            the calling thread.
 
     Raises:
-        ValueError: If `threads` is less than 1.
+        ValueError: If `threads` is not between 1 and 1024.
         OSError: If `src` cannot be opened.
     """
 
@@ -153,8 +153,8 @@ class IndexedReader:
         path: The BGZF file.
         index_path: Its index; defaults to `path` plus `.csi` or, if there is none, `.tbi`, the
             order htslib looks in.
-        threads: The number of threads decompressing blocks; 1 decompresses in the calling
-            thread.
+        threads: The number of threads decompressing blocks, from 1 to 1024; 1 decompresses in
+            the calling thread.
 
     Raises:
         FileNotFoundError: If the file, or an index for it, cannot be found.

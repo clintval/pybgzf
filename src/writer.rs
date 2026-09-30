@@ -356,8 +356,7 @@ pub fn check_options(
 ) -> Result<(CompressionLevel, NonZero<usize>)> {
     let compression = CompressionLevel::new(level)
         .map_err(|_| Error::Invalid(format!("level must be between 0 and 12, not {level}")))?;
-    let threads =
-        NonZero::new(threads).ok_or_else(|| Error::Invalid("threads must be at least 1".into()))?;
+    let threads = crate::check_threads(threads).map_err(Error::Invalid)?;
     if let Some(options) = index {
         if let Some(columns) = &options.columns {
             columns.validate().map_err(Error::Invalid)?;
@@ -390,7 +389,7 @@ impl<W: Write> Writer<W> {
     pub fn new(sink: W, level: u8, threads: usize, index: Option<IndexOptions>) -> Result<Self> {
         let (level, threads) = check_options(level, threads, index.as_ref())?;
         Ok(Self {
-            blocks: BlockWriter::new(sink, level, threads),
+            blocks: BlockWriter::new(sink, level, threads)?,
             indexer: index.map(Indexer::new),
             final_columns: None,
             io_failure: None,

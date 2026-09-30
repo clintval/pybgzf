@@ -132,6 +132,7 @@ BED = Columns.BED
 INVALID_OPTIONS: list[tuple[Callable[[Path], BgzfWriter], str]] = [
     (lambda path: BgzfWriter(path, level=13), "level"),
     (lambda path: BgzfWriter(path, threads=0), "threads"),
+    (lambda path: BgzfWriter(path, threads=100_000), "threads must be between 1 and 1024"),
     (
         lambda path: BgzfWriter(path, index=IndexFormat.TBI),
         "columns is required when index is set",
@@ -494,3 +495,9 @@ def test_sam_references_too_long_for_csi_raise(tmp_path: Path) -> None:
         writer.write(b"@SQ\tSN:chr1\tLN:4611686018427387904\n")
         with pytest.raises(ValueError, match="too long for a CSI index"):
             writer.write(b"r\t0\tchr1\t5\t60\t4M\t*\t0\t0\tACGT\tIIII\n")
+
+
+def test_huge_cigar_lengths_saturate(tmp_path: Path) -> None:
+    with BgzfWriter(tmp_path / "a.sam.gz", index=IndexFormat.CSI, columns=Columns.SAM) as writer:
+        with pytest.raises(ValueError, match="beyond the limit"):
+            writer.write(b"r\t0\tchr1\t5\t60\t9223372036854775807M2M\t*\t0\t0\tA\tI\n")

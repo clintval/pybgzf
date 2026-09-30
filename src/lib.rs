@@ -10,3 +10,15 @@ pub mod writer;
 
 #[cfg(feature = "python")]
 mod python;
+
+use std::num::NonZero;
+
+/// The most threads a reader or writer may use.
+pub const MAX_THREADS: usize = 1024;
+
+/// Checks that a thread count is between 1 and [`MAX_THREADS`].
+pub fn check_threads(threads: usize) -> Result<NonZero<usize>, String> {
+    NonZero::new(threads)
+        .filter(|threads| threads.get() <= MAX_THREADS)
+        .ok_or_else(|| format!("threads must be between 1 and {MAX_THREADS}, not {threads}"))
+}
