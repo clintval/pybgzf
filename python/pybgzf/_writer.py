@@ -219,7 +219,9 @@ def open(  # noqa: A001
 ) -> io.TextIOWrapper:
     """Open a BGZF file for writing text, so that `csv` and other text writers can write to it.
 
-    The encoding defaults to UTF-8, and `errors` and `newline` work as in `io.TextIOWrapper`.
+    The encoding defaults to UTF-8 and `errors` works as in `io.TextIOWrapper`.
+    Lines end in a line feed on every platform unless `newline` is given, which then works as in
+    `io.TextIOWrapper`.
     Every other argument is passed to `BgzfWriter`.
     """
     writer = BgzfWriter(
@@ -233,5 +235,8 @@ def open(  # noqa: A001
         csi_depth=csi_depth,
     )
     return io.TextIOWrapper(
-        writer, encoding="utf-8" if encoding is None else encoding, errors=errors, newline=newline
+        writer,
+        encoding="utf-8" if encoding is None else encoding,
+        errors=errors,
+        newline="\n" if newline is None else newline,
     )
