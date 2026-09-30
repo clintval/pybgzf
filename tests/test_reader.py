@@ -359,6 +359,20 @@ def test_queries_reach_the_last_position_an_index_holds(tmp_path: Path, index: I
         assert list(reader.query("chr1", 536870912, 10**12)) == []
 
 
+@pytest.mark.parametrize("csi_min_shift", [1, 2, 3])
+def test_vcf_with_the_smallest_csi_bins_can_be_queried(tmp_path: Path, csi_min_shift: int) -> None:
+    path = tmp_path / "small.vcf.gz"
+    lines = [f"1\t{position}\t.\tA\tG\t.\t.\t." for position in range(1, 5_000, 7)]
+    header = "##contig=<ID=1,length=10000>\n#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\n"
+    with pybgzf.writer(
+        path, index=IndexFormat.CSI, columns=Columns.VCF, csi_min_shift=csi_min_shift
+    ) as handle:
+        handle.write(header + "".join(f"{line}\n" for line in lines))
+    with IndexedReader(path) as reader:
+        assert list(reader.query("1", 0, 10_000)) == lines
+        assert list(reader.query("1", 98, 99)) == ["1\t99\t.\tA\tG\t.\t.\t."]
+
+
 @pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="named pipes are not available")
 @pytest.mark.parametrize("from_path", [True, False], ids=["path", "file-like"])
 def test_close_returns_while_a_pipe_writer_is_idle(
