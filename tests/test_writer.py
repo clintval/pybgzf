@@ -620,3 +620,12 @@ def test_reference_names_with_a_nul_byte_raise(tmp_path: Path) -> None:
         writer.write(b"chr1\t1\t2\n")
         with pytest.raises(ValueError, match=r"^line 2: the reference name .* contains a NUL byte"):
             writer.write(b"ch\x00r2\t1\t2\n")
+
+
+def test_flush_and_tell_work_after_an_indexing_error(tmp_path: Path) -> None:
+    with BgzfWriter(tmp_path / "out.bed.gz", index=IndexFormat.TBI, columns=BED) as writer:
+        writer.write(b"chr1\t100\t200\n")
+        with pytest.raises(ValueError, match="not sorted"):
+            writer.write(b"chr1\t50\t60\n")
+        writer.flush()
+        assert writer.tell() > 0

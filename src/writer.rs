@@ -463,13 +463,17 @@ impl<W: Write> Writer<W> {
         self.blocks.buffered() + len >= BLOCK_SIZE
     }
 
-    fn check(&self) -> Result<()> {
+    fn check_stream(&self) -> Result<()> {
         if self.finished {
             return Err(Error::Io(io::Error::other(
                 "I/O operation on a closed writer",
             )));
         }
-        self.check_io()?;
+        self.check_io()
+    }
+
+    fn check(&self) -> Result<()> {
+        self.check_stream()?;
         if let Some(message) = self
             .indexer
             .as_ref()
@@ -537,7 +541,7 @@ impl<W: Write> Writer<W> {
 
     /// Ends the current block and flushes everything written so far to the sink.
     pub fn flush(&mut self) -> Result<()> {
-        self.check()?;
+        self.check_stream()?;
         let result = self.blocks.flush().map_err(Error::Io);
         if let Some(indexer) = &mut self.indexer {
             indexer.resolve(&mut self.blocks);
@@ -547,7 +551,7 @@ impl<W: Write> Writer<W> {
 
     /// Returns the virtual position of the next byte to be written.
     pub fn tell(&mut self) -> Result<u64> {
-        self.check()?;
+        self.check_stream()?;
         let result = self.blocks.tell().map_err(Error::Io);
         self.guard(result)
     }
