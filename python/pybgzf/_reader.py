@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import codecs
 import errno
 import io
 import os
@@ -147,14 +148,14 @@ def open_reader(
 
     The encoding defaults to UTF-8, and `errors` and `newline` work as in `io.TextIOWrapper`.
     """
+    encoding = codecs.lookup("utf-8" if encoding is None else encoding).name
     raw = BgzfReader(src, threads=threads)
-    buffered = io.BufferedReader(raw, buffer_size=_TEXT_BUFFER_SIZE)
-    return io.TextIOWrapper(
-        buffered,
-        encoding="utf-8" if encoding is None else encoding,
-        errors=errors,
-        newline=newline,
-    )
+    try:
+        buffered = io.BufferedReader(raw, buffer_size=_TEXT_BUFFER_SIZE)
+        return io.TextIOWrapper(buffered, encoding=encoding, errors=errors, newline=newline)
+    except BaseException:
+        raw.close()
+        raise
 
 
 class IndexedReader:

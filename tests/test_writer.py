@@ -638,3 +638,10 @@ def test_text_writes_raise_indexing_errors_at_once(tmp_path: Path) -> None:
         with pytest.raises(ValueError, match="line 2: records are not sorted"):
             handle.write("chr1\t50\t60\n")
     assert not Path(f"{path}.tbi").exists()
+
+
+def test_open_writer_checks_the_encoding_first(tmp_path: Path) -> None:
+    path = tmp_path / "out.bed.gz"
+    with pytest.raises(LookupError):
+        pybgzf.open_writer(path, encoding="no-such-codec")
+    assert not path.exists()

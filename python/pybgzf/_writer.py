@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import codecs
 import io
 import os
 import stat
@@ -240,6 +241,7 @@ def open_writer(
     Every other argument is passed to `BgzfWriter`.
     With an index, text is passed on at every write, so a line that cannot be indexed raises there.
     """
+    encoding = codecs.lookup("utf-8" if encoding is None else encoding).name
     writer = BgzfWriter(
         dest,
         level=level,
@@ -250,10 +252,14 @@ def open_writer(
         csi_min_shift=csi_min_shift,
         csi_depth=csi_depth,
     )
-    return io.TextIOWrapper(
-        writer,
-        encoding="utf-8" if encoding is None else encoding,
-        errors=errors,
-        newline="\n" if newline is None else newline,
-        write_through=index is not None,
-    )
+    try:
+        return io.TextIOWrapper(
+            writer,
+            encoding=encoding,
+            errors=errors,
+            newline="\n" if newline is None else newline,
+            write_through=index is not None,
+        )
+    except BaseException:
+        writer.close()
+        raise

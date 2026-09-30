@@ -538,3 +538,8 @@ def test_query_bounds_beyond_64_bits(data_dir: Path, lines: list[str]) -> None:
     with IndexedReader(bed_path(data_dir, IndexFormat.TBI)) as reader:
         assert list(reader.query("chr2", 0, 10**30)) == overlapping(lines, "chr2", 0, 10**12)
         assert list(reader.query("chr2", 10**30, 10**31)) == []
+
+
+def test_open_reader_checks_the_encoding_first(data_dir: Path) -> None:
+    with pytest.raises(LookupError):
+        pybgzf.open_reader(bed_path(data_dir, IndexFormat.TBI), threads=2, encoding="no-such-codec")
