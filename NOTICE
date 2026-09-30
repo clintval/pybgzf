@@ -17,5 +17,12 @@ which are distributed under the MIT/Expat License:
   Copyright (C) 2010-2012 Broad Institute.
 
 Compression uses the bgzf crate (https://github.com/fulcrumgenomics/bgzf, MIT).
+Compressed blocks are deflated and inflated by libdeflate
+(https://github.com/ebiggers/libdeflate), which is statically linked and is
+distributed under the MIT License:
+
+  Copyright 2016 Eric Biggers
+  Copyright 2024 Google LLC
+
 Decompression and reading and writing indexes use noodles
 (https://github.com/zaeleus/noodles, MIT).
