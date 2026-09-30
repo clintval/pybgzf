@@ -613,3 +613,10 @@ def test_an_index_path_that_cannot_be_created_fails_at_once(tmp_path: Path) -> N
     index_path = tmp_path / "missing" / "out.tbi"
     with pytest.raises(FileNotFoundError, match="missing"):
         BgzfWriter(io.BytesIO(), index=IndexFormat.TBI, index_path=index_path, columns=BED)
+
+
+def test_reference_names_with_a_nul_byte_raise(tmp_path: Path) -> None:
+    with BgzfWriter(tmp_path / "a.bed.gz", index=IndexFormat.TBI, columns=BED) as writer:
+        writer.write(b"chr1\t1\t2\n")
+        with pytest.raises(ValueError, match=r"^line 2: the reference name .* contains a NUL byte"):
+            writer.write(b"ch\x00r2\t1\t2\n")

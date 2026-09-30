@@ -242,6 +242,12 @@ impl Indexer {
         let interval = columns
             .parse(line)
             .map_err(|e| format!("line {number}: {e}"))?;
+        if memchr(0, interval.name).is_some() {
+            return Err(format!(
+                "line {number}: the reference name {:?} contains a NUL byte",
+                String::from_utf8_lossy(interval.name)
+            ));
+        }
         let (min_shift, depth) = match self.bins {
             Some(bins) => bins,
             None => self
