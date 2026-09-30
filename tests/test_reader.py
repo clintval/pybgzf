@@ -532,3 +532,9 @@ def test_short_reads_from_a_source(threads: int) -> None:
 def test_sources_without_read_raise_at_once() -> None:
     with pytest.raises(TypeError, match="read"):
         BgzfReader(cast(str, cast(object, b"features.bed.gz")))
+
+
+def test_query_bounds_beyond_64_bits(data_dir: Path, lines: list[str]) -> None:
+    with IndexedReader(bed_path(data_dir, IndexFormat.TBI)) as reader:
+        assert list(reader.query("chr2", 0, 10**30)) == overlapping(lines, "chr2", 0, 10**12)
+        assert list(reader.query("chr2", 10**30, 10**31)) == []

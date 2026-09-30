@@ -16,6 +16,7 @@ from pybgzf._columns import Columns
 from pybgzf._columns import columns_from_tuple
 
 _TEXT_BUFFER_SIZE = 1 << 20
+_MAX_POSITION = (1 << 63) - 1
 
 
 class ReadableBinary(Protocol):
@@ -227,7 +228,11 @@ class IndexedReader:
                 before it have been returned, a line in the region cannot be parsed or is not
                 UTF-8, naming its virtual offset.
         """
-        return self._inner.query(refname, start, end)
+        if start < 0 or end < start:
+            raise ValueError(
+                f"start must be at least 0 and end at least start, not {start} and {end}"
+            )
+        return self._inner.query(refname, min(start, _MAX_POSITION), min(end, _MAX_POSITION))
 
     def close(self) -> None:
         """Stop any decompression threads and close the file."""
