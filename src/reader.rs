@@ -125,6 +125,23 @@ fn not_in_file(position: u64) -> io::Error {
     )
 }
 
+/// Adds the likely cause to an error reading where an index points, which means the file is not
+/// the one its index describes.
+fn unlike_index(error: io::Error) -> io::Error {
+    match error.kind() {
+        io::ErrorKind::InvalidData | io::ErrorKind::InvalidInput | io::ErrorKind::UnexpectedEof => {
+            io::Error::new(
+                error.kind(),
+                format!(
+                    "{error}; the file may be truncated, may have changed since it was opened, \
+                     or may not be the file its index was made from"
+                ),
+            )
+        }
+        _ => error,
+    }
+}
+
 impl BgzfReader<BufReader<File>> {
     /// Opens a BGZF file.
     pub fn from_path<P: AsRef<Path>>(path: P, threads: NonZero<usize>) -> io::Result<Self> {
@@ -530,7 +547,7 @@ impl<R: Read + Seek + Send + 'static> IndexedReader<R> {
             if let Some(position) = query.position
                 && position != self.reader.virtual_position()
             {
-                self.reader.seek(position)?;
+                self.reader.seek(position).map_err(unlike_index)?;
             }
             let at_chunk_end = match (query.position, query.chunk_end) {
                 (Some(position), Some(end)) => position >= end,
@@ -543,14 +560,15 @@ impl<R: Read + Seek + Send + 'static> IndexedReader<R> {
                 };
                 let start = u64::from(chunk.start());
                 if query.position != Some(start) {
-                    self.reader.seek(start)?;
+                    self.reader.seek(start).map_err(unlike_index)?;
                 }
                 query.chunk_end = Some(u64::from(chunk.end()));
                 query.next_chunk += 1;
             }
             let offset = self.reader.virtual_position();
             self.line.clear();
-            if self.reader.read_until(b'\n', &mut self.line)? == 0 {
+            let read = self.reader.read_until(b'\n', &mut self.line);
+            if read.map_err(unlike_index)? == 0 {
                 query.done = true;
                 break;
             }
@@ -788,6 +806,25 @@ mod tests {
         }
         assert_eq!(a, brute_force(&data, b"chr1", 0, 100_000));
         assert_eq!(b, brute_force(&data, b"chr2", 0, 100_000));
+    }
+
+    #[test]
+    fn reading_where_an_index_points_past_its_file_names_the_likely_cause() {
+        let (_dir, _path, index_path) = written(&bed(20_000), IndexFormat::Tabix);
+        let (_other_dir, other, _) = written(&bed(10), IndexFormat::Tabix);
+        let reader = BgzfReader::from_path(&other, threads(1)).unwrap();
+        let mut indexed = IndexedReader::new(reader, AnyIndex::read(&index_path).unwrap()).unwrap();
+        let mut query = indexed.query(b"chr2", 0, 1 << 29).unwrap();
+        let Err(Error::Io(error)) = indexed.next_lines(&mut query, &mut Vec::new(), usize::MAX)
+        else {
+            panic!("reading past the end of the file succeeded");
+        };
+        let message = error.to_string();
+        assert!(message.starts_with("virtual offset"), "{message}");
+        assert!(
+            message.ends_with("may not be the file its index was made from"),
+            "{message}"
+        );
     }
 
     #[test]
