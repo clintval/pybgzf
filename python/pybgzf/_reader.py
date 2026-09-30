@@ -167,7 +167,8 @@ class IndexedReader:
         index_path: Its index; defaults to `path` plus `.csi` or, if there is none, `.tbi`, the
             order htslib looks in.
         threads: The number of threads decompressing blocks, from 1 to 1024; 1 decompresses in
-            the calling thread.
+            the calling thread and is usually fastest for many small queries, since more threads
+            restart their read-ahead at every seek.
 
     Raises:
         FileNotFoundError: If the file, or an index for it, cannot be found.

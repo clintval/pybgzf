@@ -17,6 +17,7 @@ use noodles_csi::binning_index::index::Header;
 use noodles_csi::binning_index::index::header::Format;
 use noodles_csi::binning_index::index::header::format::CoordinateSystem;
 use noodles_csi::binning_index::index::reference_sequence::bin::Chunk;
+use noodles_csi::binning_index::index::reference_sequence::index::Index as ReferenceIndex;
 
 use crate::columns::{Columns, Kind};
 use crate::index::max_position;
@@ -329,10 +330,30 @@ impl AnyIndex {
 
     fn chunks(&self, tid: usize, interval: Interval) -> io::Result<Vec<Chunk>> {
         match self {
-            AnyIndex::Tabix(index) => index.query(tid, interval),
-            AnyIndex::Csi(index) => index.query(tid, interval),
+            AnyIndex::Tabix(index) => clipped_chunks(index, tid, interval),
+            AnyIndex::Csi(index) => clipped_chunks(index, tid, interval),
         }
     }
+}
+
+/// Returns the chunks overlapping `interval`, skipping what precedes the first record that could
+/// overlap it, as recorded in the linear or binned index, as htslib does.
+fn clipped_chunks<I: ReferenceIndex>(
+    index: &noodles_csi::binning_index::Index<I>,
+    tid: usize,
+    interval: Interval,
+) -> io::Result<Vec<Chunk>> {
+    let chunks = index.query(tid, interval)?;
+    let Some(reference) = index.reference_sequences().get(tid) else {
+        return Ok(chunks);
+    };
+    let start = interval.start().unwrap_or(Position::MIN);
+    let min = reference.min_offset(index.min_shift(), index.depth(), start);
+    Ok(chunks
+        .into_iter()
+        .filter(|chunk| chunk.end() > min)
+        .map(|chunk| Chunk::new(chunk.start().max(min), chunk.end()))
+        .collect())
 }
 
 /// Returns the columns an index header describes.
@@ -696,6 +717,17 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn queries_start_at_the_linear_index() {
+        let data = bed(20_000);
+        let (_dir, path, index_path) = written(&data, IndexFormat::Tabix);
+        let reader = BgzfReader::from_path(&path, threads(1)).unwrap();
+        let indexed = IndexedReader::new(reader, AnyIndex::read(&index_path).unwrap()).unwrap();
+        let query = indexed.query(b"chr1", 700_000, 700_100).unwrap();
+        let first = u64::from(query.chunks[0].start());
+        assert!(first >> 16 > 0, "the query starts at {first}");
     }
 
     #[test]
