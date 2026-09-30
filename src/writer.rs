@@ -19,6 +19,7 @@ use crate::{Error, Result};
 const TABIX_MIN_SHIFT: u32 = 14;
 const TABIX_DEPTH: u32 = 5;
 const TABIX_MAX_SHIFT: u32 = 31;
+const CSI_MAX_DEPTH: u32 = 9;
 const NO_COLUMNS: &str =
     "could not infer columns because no data lines were written; pass columns explicitly";
 
@@ -78,12 +79,11 @@ fn longest(line: &[u8], prefix: &[u8], key: &[u8], skip_padding: bool) -> Option
 }
 
 fn csi_bins(mut min_shift: u32, longest_reference: i64) -> std::result::Result<(u32, u32), String> {
-    const MAX_DEPTH: u32 = 9;
     const MAX_SHIFT: u32 = 62;
     if longest_reference <= 0 {
         let depth = match min_shift {
-            0..10 => MAX_DEPTH,
-            10..25 => MAX_DEPTH - (min_shift - 10) / 3,
+            0..10 => CSI_MAX_DEPTH,
+            10..25 => CSI_MAX_DEPTH - (min_shift - 10) / 3,
             _ => 4,
         };
         return Ok((min_shift, depth));
@@ -96,12 +96,12 @@ fn csi_bins(mut min_shift: u32, longest_reference: i64) -> std::result::Result<(
         ));
     }
     let mut depth = default_depth(min_shift);
-    if needed <= max_position(min_shift, MAX_DEPTH) {
+    if needed <= max_position(min_shift, CSI_MAX_DEPTH) {
         while needed > max_position(min_shift, depth) {
             depth += 1;
         }
     } else {
-        depth = MAX_DEPTH;
+        depth = CSI_MAX_DEPTH;
         while needed > max_position(min_shift, depth) {
             min_shift += 1;
         }
@@ -109,9 +109,10 @@ fn csi_bins(mut min_shift: u32, longest_reference: i64) -> std::result::Result<(
     Ok((min_shift, depth))
 }
 
-/// The CSI depth `tabix -C` starts from, which reaches at least 2^31 bases.
+/// The CSI depth `tabix -C` starts from, which reaches at least 2^31 bases, but at most 9
+/// levels, since htslib and noodles overflow counting the bins of 10.
 fn default_depth(min_shift: u32) -> u32 {
-    (TABIX_MAX_SHIFT + 2).saturating_sub(min_shift) / 3
+    ((TABIX_MAX_SHIFT + 2).saturating_sub(min_shift) / 3).min(CSI_MAX_DEPTH)
 }
 
 fn trim_line(line: &[u8]) -> &[u8] {
@@ -765,6 +766,21 @@ mod tests {
         assert_eq!(csi_bins(14, (1 << 62) - 256), Ok((35, 9)));
         assert!(csi_bins(14, (1 << 62) - 255).is_err());
         assert!(csi_bins(14, i64::MAX).is_err());
+    }
+
+    #[test]
+    fn csi_depth_stays_within_nine_levels() {
+        assert_eq!(csi_bins(2, 1_000_000), Ok((2, 9)));
+        let dir = tempfile::tempdir().unwrap();
+        let csi = IndexFormat::Csi {
+            min_shift: 1,
+            depth: None,
+        };
+        let options = options(&dir, csi, Some(Columns::bed()));
+        Writer::new(Vec::new(), 1, 1, Some(options))
+            .unwrap()
+            .finish()
+            .unwrap();
     }
 
     #[test]

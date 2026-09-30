@@ -91,7 +91,7 @@ class BgzfWriter(io.RawIOBase):
             Without `index`, columns are not used.
         csi_min_shift: The width, as a power of two, of the smallest CSI bin; a small one with long
             features makes a large index, as in htslib.
-        csi_depth: The number of CSI bin levels; None chooses as `tabix -C` does.
+        csi_depth: The number of CSI bin levels; None chooses as `tabix -C` does, but at most 9.
 
     Raises:
         ValueError: If the options are invalid, checked before anything is created.

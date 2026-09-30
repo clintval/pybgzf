@@ -34,6 +34,7 @@ classifiers = [
 [dependency-groups]
 dev = [
     "basedpyright ~=1.40",
+    "hypothesis ~=6.168",
     "maturin ~=1.15",
     "mypy ~=2.3",
     "poethepoet ~=0.48",
@@ -58,7 +59,10 @@ include       = [
     { path = "NOTICE", format = "sdist" },
     { path = "tests/*.py", format = "sdist" },
 ]
-exclude       = [{ path = ".github/**/*", format = "sdist" }]
+exclude       = [
+    { path = ".github/**/*", format = "sdist" },
+    { path = "fuzz/**/*", format = "sdist" },
+]
 
 [tool.uv]
 # Ignore releases younger than a week, so a compromised publish has time to be

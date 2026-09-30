@@ -21,6 +21,16 @@ cargo test --no-default-features
 
 Tests that compare output against htslib run only when `bgzip` and `tabix` are on the `PATH`, for example after `brew install htslib` or `sudo apt-get install tabix`.
 The VCF comparisons also need htslib 1.23 or newer, whose rules for the end of a VCF record `pybgzf` follows.
+The randomized comparisons draw new files with [Hypothesis](https://hypothesis.readthedocs.io) on every run, except when `CI` is set, where they draw the same files each time.
+
+## Fuzzing
+
+The [cargo-fuzz](https://rust-fuzz.github.io/book/cargo-fuzz.html) targets in `fuzz/` parse and index arbitrary lines, and the [`fuzz.yml`](.github/workflows/fuzz.yml) workflow runs each for ten minutes every week.
+To run one locally, install a nightly toolchain and `cargo install cargo-fuzz`, then run:
+
+```console
+cargo +nightly fuzz run parse_columns -- -dict=fuzz/columns.dict
+```
 
 ## Local Linting and Formatting
 

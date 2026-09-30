@@ -349,6 +349,7 @@ fn parse_vcf(line: &[u8]) -> Result<Interval<'_>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
 
     fn interval(columns: &Columns, line: &str) -> (String, i64, i64) {
         let parsed = columns.parse(line.as_bytes()).unwrap();
@@ -654,5 +655,200 @@ mod tests {
         let vcf = |line: &[u8]| Columns::vcf().parse(line).unwrap_err();
         assert_eq!(vcf(b"1"), "expected at least 2 tab-separated columns");
         assert_eq!(vcf(b"1\tx"), r#"column 2 is not an integer: "x""#);
+    }
+
+    const NUMBERS: &[&[u8]] = &[
+        b"",
+        b"0",
+        b"1",
+        b"-1",
+        b"+7",
+        b"\x0c42",
+        b"-0",
+        b"12345678901234567",
+        b"123456789012345678",
+        b"1234567890123456789",
+        b"000000000000000000042",
+        b"9223372036854775806",
+        b"9223372036854775807",
+        b"9223372036854775808",
+        b"-9223372036854775808",
+        b"99999999999999999999",
+        b"-99999999999999999999",
+    ];
+
+    const TOKENS: &[&[u8]] = &[
+        b".",
+        b"*",
+        b"A",
+        b"ACGT",
+        b"<",
+        b">",
+        b"<DEL>",
+        b"<DEL",
+        b"<DUP:TANDEM>",
+        b"<CNV>",
+        b"<INV>",
+        b"<INS>",
+        b"<*>",
+        b"<NON_REF>",
+        b"END=",
+        b"SVLEN=",
+        b"LEN",
+        b"GT:LEN",
+        b":",
+        b";",
+        b",",
+        b"=",
+        b"M",
+        b"N",
+        b"D",
+        b"I",
+        b"S",
+        b"\r",
+        b"\0",
+        b"\xff",
+    ];
+
+    const LINES: &[&[u8]] = &[
+        b"chr1\t10\t20\tname",
+        b"chr2\tsrc\tgene\t100\t200\t.\t+\t.\tID=a",
+        b"r\t0\tchr1\t100\t60\t10M5D3I4N2S\t*\t0\t0\tA\tI",
+        b"1\t100\t.\tA\t<DEL>,T\t.\t.\tSVTYPE=DEL;END=400;SVLEN=-300,.",
+        b"1\t100\t.\tA\t<*>,<NON_REF>\t.\t.\t.\tGT:LEN\t0/0:40\t0/0:60",
+    ];
+
+    fn arbitrary_line() -> impl Strategy<Value = Vec<u8>> {
+        let field = prop::collection::vec(any::<u8>(), 0..24);
+        prop::collection::vec(field, 0..14).prop_map(|fields| fields.join(&b'\t'))
+    }
+
+    fn field() -> impl Strategy<Value = Vec<u8>> {
+        let token = || prop::sample::select(TOKENS);
+        let number = || prop::sample::select(NUMBERS);
+        prop_oneof![
+            prop::collection::vec(token(), 1..6).prop_map(|tokens| tokens.concat()),
+            prop::collection::vec((number(), token()), 1..6)
+                .prop_map(|pairs| pairs.iter().flat_map(|(n, t)| [*n, *t].concat()).collect()),
+            prop::collection::vec(any::<u8>(), 0..12),
+        ]
+    }
+
+    fn mutated_line() -> impl Strategy<Value = Vec<u8>> {
+        prop::sample::select(LINES).prop_flat_map(|line| {
+            let fields: Vec<&[u8]> = line.split(|&b| b == b'\t').collect();
+            let count = fields.len();
+            (
+                prop::collection::vec(prop::option::weighted(0.25, field()), count),
+                prop_oneof![3 => Just(count), 1 => 0..=count],
+                prop::collection::vec(field(), 0..3),
+            )
+                .prop_map(move |(replacements, kept, extra)| {
+                    let mut mutated: Vec<Vec<u8>> = fields
+                        .iter()
+                        .zip(replacements)
+                        .map(|(field, replacement)| replacement.unwrap_or_else(|| field.to_vec()))
+                        .take(kept)
+                        .collect();
+                    mutated.extend(extra);
+                    mutated.join(&b'\t')
+                })
+        })
+    }
+
+    fn generic_columns() -> impl Strategy<Value = Columns> {
+        let column = || 1..8_usize;
+        (
+            column(),
+            column(),
+            prop::option::of(column()),
+            any::<bool>(),
+        )
+            .prop_map(|(refname, start, end, zero_based)| Columns {
+                refname,
+                start,
+                end,
+                zero_based,
+                ..Columns::bed()
+            })
+    }
+
+    fn check_every_format(line: &[u8], generic: Columns) -> Result<(), TestCaseError> {
+        let presets = [
+            Columns::bed(),
+            Columns::bed2(),
+            Columns::gff(),
+            Columns::vcf(),
+            Columns::sam(),
+        ];
+        for columns in presets.into_iter().chain([generic]) {
+            if let Ok(interval) = columns.parse(line) {
+                prop_assert!(interval.beg >= 0 && interval.end >= 0, "{columns:?}");
+                prop_assert!(!interval.name.contains(&b'\t'), "{columns:?}");
+            }
+        }
+        Ok(())
+    }
+
+    fn saturating_integer_prefix(bytes: &[u8]) -> Option<(i64, usize)> {
+        let spaces = bytes.iter().take_while(|b| b.is_ascii_whitespace()).count();
+        let start = spaces + usize::from(matches!(bytes.get(spaces), Some(b'-' | b'+')));
+        let digits = bytes[start..]
+            .iter()
+            .take_while(|b| b.is_ascii_digit())
+            .count();
+        let magnitude = bytes[start..start + digits]
+            .iter()
+            .fold(0_i64, |value, &b| {
+                value.saturating_mul(10).saturating_add(i64::from(b - b'0'))
+            });
+        let value = if bytes.get(spaces) == Some(&b'-') {
+            -magnitude
+        } else {
+            magnitude
+        };
+        (digits > 0).then_some((value, start + digits))
+    }
+
+    fn integer_text() -> impl Strategy<Value = Vec<u8>> {
+        (
+            prop::sample::select(vec!["", " ", "\x0c\r "]),
+            prop::sample::select(vec!["", "+", "-"]),
+            0..24_usize,
+            prop::collection::vec(b'0'..=b'9', 0..24),
+            prop::sample::select(vec!["", "x", "M", ",", ";", "\t", ".5"]),
+        )
+            .prop_map(|(space, sign, zeros, digits, suffix)| {
+                let zeros = vec![b'0'; zeros];
+                [
+                    space.as_bytes(),
+                    sign.as_bytes(),
+                    &zeros,
+                    &digits,
+                    suffix.as_bytes(),
+                ]
+                .concat()
+            })
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(4096))]
+
+        #[test]
+        fn parse_never_panics_on_arbitrary_bytes(line in arbitrary_line(), generic in generic_columns()) {
+            check_every_format(&line, generic)?;
+        }
+
+        #[test]
+        fn parse_never_panics_on_mutated_lines(line in mutated_line(), generic in generic_columns()) {
+            check_every_format(&line, generic)?;
+        }
+
+        #[test]
+        fn integers_parse_like_a_saturating_fold(
+            text in prop_oneof![integer_text(), prop::collection::vec(any::<u8>(), 0..32)]
+        ) {
+            prop_assert_eq!(integer_prefix(&text), saturating_integer_prefix(&text));
+        }
     }
 }

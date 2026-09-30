@@ -343,7 +343,17 @@ impl AnyIndex {
             .map_err(|_| invalid())?;
         match &magic {
             b"TBI\x01" => Ok(AnyIndex::Tabix(noodles_tabix::fs::read(path)?)),
-            b"CSI\x01" => Ok(AnyIndex::Csi(noodles_csi::fs::read(path)?)),
+            b"CSI\x01" => {
+                let index = noodles_csi::fs::read(path)?;
+                if index.depth() > 9 {
+                    let message = format!(
+                        "the CSI index has {} bin levels, but at most 9 can be queried",
+                        index.depth()
+                    );
+                    return Err(io::Error::new(io::ErrorKind::InvalidData, message));
+                }
+                Ok(AnyIndex::Csi(index))
+            }
             _ => Err(invalid()),
         }
     }

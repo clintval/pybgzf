@@ -170,7 +170,8 @@ class IndexedReader:
 
     Raises:
         FileNotFoundError: If the file, or an index for it, cannot be found.
-        ValueError: If the index is not a tabix or CSI index with a tabix header.
+        ValueError: If the index is not a tabix or CSI index with a tabix header, or is a CSI
+            index with more than 9 bin levels, which `tabix -C -m` below 4 can write.
     """
 
     def __init__(

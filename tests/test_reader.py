@@ -3,6 +3,7 @@ import io
 import os
 import random
 import shutil
+import struct
 import threading
 import warnings
 from pathlib import Path
@@ -357,6 +358,32 @@ def test_queries_reach_the_last_position_an_index_holds(tmp_path: Path, index: I
         assert list(reader.query("chr1", 536870911, 536870912)) == [last]
         assert list(reader.query("chr1", 536870900, 10**12)) == [last]
         assert list(reader.query("chr1", 536870912, 10**12)) == []
+
+
+@pytest.mark.parametrize("csi_min_shift", [1, 2, 3])
+def test_vcf_with_the_smallest_csi_bins_can_be_queried(tmp_path: Path, csi_min_shift: int) -> None:
+    path = tmp_path / "small.vcf.gz"
+    lines = [f"1\t{position}\t.\tA\tG\t.\t.\t." for position in range(1, 5_000, 7)]
+    header = "##contig=<ID=1,length=10000>\n#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\n"
+    with pybgzf.writer(
+        path, index=IndexFormat.CSI, columns=Columns.VCF, csi_min_shift=csi_min_shift
+    ) as handle:
+        handle.write(header + "".join(f"{line}\n" for line in lines))
+    with IndexedReader(path) as reader:
+        assert list(reader.query("1", 0, 10_000)) == lines
+        assert list(reader.query("1", 98, 99)) == ["1\t99\t.\tA\tG\t.\t.\t."]
+
+
+def test_csi_indexes_deeper_than_nine_levels_are_rejected(tmp_path: Path) -> None:
+    path = tmp_path / "deep.vcf.gz"
+    with pybgzf.writer(path) as handle:
+        handle.write("1\t1\t.\tA\tG\t.\t.\t.\n")
+    header = struct.pack("<7i", 2, 1, 2, 0, ord("#"), 0, 2) + b"1\0"
+    index = struct.pack("<4s3i", b"CSI\x01", 2, 10, len(header)) + header + struct.pack("<2i", 1, 0)
+    with BgzfWriter(f"{path}.csi") as writer:
+        writer.write(index)
+    with pytest.raises(ValueError, match="has 10 bin levels"):
+        IndexedReader(path)
 
 
 @pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="named pipes are not available")
