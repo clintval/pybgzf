@@ -585,11 +585,17 @@ impl IndexedReader {
 
     #[getter]
     fn refnames(&mut self) -> PyResult<Vec<String>> {
-        Ok(self
-            .inner()?
+        self.inner()?
             .names()
-            .map(|name| String::from_utf8_lossy(name).into_owned())
-            .collect())
+            .map(|name| {
+                String::from_utf8(name.to_vec()).map_err(|_| {
+                    PyValueError::new_err(format!(
+                        "the reference name {:?} in the index is not UTF-8",
+                        String::from_utf8_lossy(name)
+                    ))
+                })
+            })
+            .collect()
     }
 
     #[getter]
@@ -617,7 +623,7 @@ const QUERY_BATCH: usize = 256 * 1024;
 struct QueryIterator {
     reader: Py<IndexedReader>,
     query: Query,
-    lines: VecDeque<Vec<u8>>,
+    lines: VecDeque<String>,
     done: bool,
 }
 
@@ -630,9 +636,7 @@ impl QueryIterator {
     fn __next__<'py>(&mut self, py: Python<'py>) -> PyResult<Option<Bound<'py, PyString>>> {
         loop {
             if let Some(line) = self.lines.pop_front() {
-                let text = std::str::from_utf8(&line)
-                    .map_err(|e| PyValueError::new_err(format!("a line is not UTF-8: {e}")))?;
-                return Ok(Some(PyString::new(py, text)));
+                return Ok(Some(PyString::new(py, &line)));
             }
             if self.done {
                 return Ok(None);

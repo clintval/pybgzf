@@ -189,7 +189,11 @@ class IndexedReader:
 
     @property
     def refnames(self) -> list[str]:
-        """The reference names in the index, in the order they appear in the file."""
+        """The reference names in the index, in the order they appear in the file.
+
+        Raises:
+            ValueError: If a name is not UTF-8.
+        """
         return self._inner.refnames
 
     @property
@@ -209,8 +213,9 @@ class IndexedReader:
         An empty region, or a reference name not in the index, returns no lines.
 
         Raises:
-            ValueError: If `start` is negative or `end` is less than `start`, or a line in the
-                region cannot be parsed.
+            ValueError: If `start` is negative or `end` is less than `start`, or, once the lines
+                before it have been returned, a line in the region cannot be parsed or is not
+                UTF-8, naming its virtual offset.
         """
         return self._inner.query(refname, start, end)
 

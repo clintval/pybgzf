@@ -390,3 +390,28 @@ def test_close_returns_while_a_pipe_writer_is_idle(
         closer.join()
     feeder.join()
     assert closed
+
+
+def test_lines_that_are_not_utf8_name_their_reference_and_offset(tmp_path: Path) -> None:
+    path = tmp_path / "latin1.bed.gz"
+    bad = "chr2\t10\t20\tcafé\n".encode("latin-1")
+    with BgzfWriter(path, index=IndexFormat.TBI, columns=Columns.BED) as writer:
+        writer.write(b"chr1\t1\t2\tok\nchr2\t5\t6\tok\n" + bad)
+    with BgzfReader(path) as reader:
+        offset = reader.tell()
+        while reader.readline() != bad:
+            offset = reader.tell()
+    with IndexedReader(path) as reader:
+        assert list(reader.query("chr1", 0, 10)) == ["chr1\t1\t2\tok"]
+        lines = reader.query("chr2", 0, 100)
+        assert next(lines) == "chr2\t5\t6\tok"
+        with pytest.raises(ValueError, match=f'"chr2" at virtual offset {offset} is not UTF-8'):
+            next(lines)
+
+
+def test_reference_names_that_are_not_utf8_raise(tmp_path: Path) -> None:
+    path = tmp_path / "latin1.bed.gz"
+    with BgzfWriter(path, index=IndexFormat.TBI, columns=Columns.BED) as writer:
+        writer.write("chré\t1\t2\n".encode("latin-1"))
+    with IndexedReader(path) as reader, pytest.raises(ValueError, match="not UTF-8"):
+        _ = reader.refnames

@@ -258,6 +258,7 @@ pub struct Query {
     next_chunk: usize,
     chunk_end: Option<u64>,
     position: Option<u64>,
+    failure: Option<String>,
     done: bool,
 }
 
@@ -316,6 +317,7 @@ impl<R: Read + Seek + Send + 'static> IndexedReader<R> {
             next_chunk: 0,
             chunk_end: None,
             position: None,
+            failure: None,
             done: true,
         };
         let Some(tid) = self.names.get_index_of(name) else {
@@ -338,12 +340,19 @@ impl<R: Read + Seek + Send + 'static> IndexedReader<R> {
 
     /// Reads the next lines of `query`, without their line terminators, appending up to about
     /// `budget` bytes of them to `lines`. Returns false once the query is exhausted.
+    ///
+    /// A line that cannot be parsed, or that overlaps the region but is not UTF-8, is an error
+    /// returned once the lines before it have been.
     pub fn next_lines(
         &mut self,
         query: &mut Query,
-        lines: &mut Vec<Vec<u8>>,
+        lines: &mut Vec<String>,
         budget: usize,
     ) -> Result<bool, QueryError> {
+        if let Some(message) = query.failure.take() {
+            query.done = true;
+            return Err(QueryError::Invalid(message));
+        }
         let mut used = 0;
         while !query.done && used < budget {
             if query
@@ -368,6 +377,7 @@ impl<R: Read + Seek + Send + 'static> IndexedReader<R> {
                 query.chunk_end = Some(u64::from(chunk.end()));
                 query.next_chunk += 1;
             }
+            let offset = self.reader.virtual_position();
             self.line.clear();
             if self.reader.read_line(&mut self.line)? == 0 {
                 query.done = true;
@@ -378,9 +388,16 @@ impl<R: Read + Seek + Send + 'static> IndexedReader<R> {
             if content.first() == Some(&self.columns.meta_char) {
                 continue;
             }
-            let interval = self.columns.parse(content).map_err(|message| {
-                QueryError::Invalid(format!("{message}: {:?}", String::from_utf8_lossy(content)))
-            })?;
+            let interval = match self.columns.parse(content) {
+                Ok(interval) => interval,
+                Err(message) => {
+                    let line = String::from_utf8_lossy(content);
+                    query.failure = Some(format!(
+                        "the line at virtual offset {offset} cannot be parsed: {message}: {line:?}"
+                    ));
+                    break;
+                }
+            };
             if self.names.get_index_of(interval.name) != Some(query.tid)
                 || interval.beg >= query.end
             {
@@ -388,8 +405,15 @@ impl<R: Read + Seek + Send + 'static> IndexedReader<R> {
                 break;
             }
             if interval.end > query.beg && query.end > interval.beg {
-                used += content.len();
-                lines.push(content.to_vec());
+                let Ok(text) = std::str::from_utf8(content) else {
+                    query.failure = Some(format!(
+                        "the line on {:?} at virtual offset {offset} is not UTF-8",
+                        String::from_utf8_lossy(interval.name)
+                    ));
+                    break;
+                };
+                used += text.len();
+                lines.push(text.to_owned());
             }
         }
         Ok(!query.done)
@@ -514,14 +538,14 @@ mod tests {
         }
     }
 
-    fn brute_force(data: &[u8], name: &[u8], beg: i64, end: i64) -> Vec<Vec<u8>> {
+    fn brute_force(data: &[u8], name: &[u8], beg: i64, end: i64) -> Vec<String> {
         data.split(|&b| b == b'\n')
             .filter(|line| !line.is_empty())
             .filter(|line| {
                 let parsed = Columns::bed().parse(line).unwrap();
                 parsed.name == name && parsed.beg < end && parsed.end > beg && beg < end
             })
-            .map(<[u8]>::to_vec)
+            .map(|line| String::from_utf8(line.to_vec()).unwrap())
             .collect()
     }
 
