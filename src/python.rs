@@ -202,8 +202,8 @@ impl<T: Send> Lock<T> {
         }
     }
 
-    fn guard<'a>(&'a self, inner: MutexGuard<'a, T>) -> Guard<'a, T> {
-        self.owner.store(this_thread(), Ordering::Relaxed);
+    fn guard<'a>(&'a self, inner: MutexGuard<'a, T>, thread: usize) -> Guard<'a, T> {
+        self.owner.store(thread, Ordering::Relaxed);
         Guard {
             inner,
             owner: &self.owner,
@@ -211,20 +211,22 @@ impl<T: Send> Lock<T> {
     }
 
     fn try_lock(&self) -> Option<Guard<'_, T>> {
-        match self.mutex.try_lock() {
-            Ok(inner) => Some(self.guard(inner)),
-            Err(TryLockError::Poisoned(poisoned)) => Some(self.guard(poisoned.into_inner())),
-            Err(TryLockError::WouldBlock) => None,
-        }
+        let inner = match self.mutex.try_lock() {
+            Ok(inner) => inner,
+            Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
+            Err(TryLockError::WouldBlock) => return None,
+        };
+        Some(self.guard(inner, this_thread()))
     }
 
     /// Waits for the lock; called without the GIL.
     fn lock(&self) -> PyResult<Guard<'_, T>> {
-        if self.owner.load(Ordering::Relaxed) == this_thread() {
+        let thread = this_thread();
+        if self.owner.load(Ordering::Relaxed) == thread {
             return Err(PyRuntimeError::new_err("reentrant call"));
         }
         let inner = self.mutex.lock().unwrap_or_else(PoisonError::into_inner);
-        Ok(self.guard(inner))
+        Ok(self.guard(inner, thread))
     }
 
     /// Calls a quick `f`, releasing the GIL only to wait for another thread.
