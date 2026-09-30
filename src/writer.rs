@@ -11,7 +11,7 @@ use indexmap::IndexSet;
 use memchr::{memchr, memmem};
 
 use crate::block::{BLOCK_SIZE, BlockWriter, LogicalPosition};
-use crate::columns::{Columns, Kind};
+use crate::columns::{Columns, Kind, leading_digits};
 use crate::index::{self, IndexBuilder, Layout, max_position};
 use crate::sniff::Sniffer;
 
@@ -88,15 +88,7 @@ fn longest(line: &[u8], prefix: &[u8], key: &[u8], skip_padding: bool) -> Option
             .count();
         value = &value[padding..];
     }
-    let digits = value.iter().take_while(|b| b.is_ascii_digit()).count();
-    if digits == 0 {
-        return None;
-    }
-    Some(value[..digits].iter().fold(0_i64, |total, digit| {
-        total
-            .saturating_mul(10)
-            .saturating_add(i64::from(digit - b'0'))
-    }))
+    leading_digits(value).map(|(length, _)| length)
 }
 
 fn csi_bins(mut min_shift: u32, longest_reference: i64) -> std::result::Result<(u32, u32), String> {
