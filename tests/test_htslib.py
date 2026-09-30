@@ -173,6 +173,26 @@ def test_csi_min_shift_grows_for_long_contigs(tmp_path: Path, length: int, min_s
     assert_identical(ours, htslib_index(tmp_path / "a.vcf.gz", CSI, "-p", "vcf"))
 
 
+@requires_htslib_1_23
+def test_vcf_records_wider_than_a_block(tmp_path: Path) -> None:
+    samples = 40_000
+    header = "\t".join(["#CHROM", "POS", "ID", "REF", "ALT", "QUAL", "FILTER", "INFO", "FORMAT"])
+    lines = [
+        "##fileformat=VCFv4.3\n",
+        "##contig=<ID=1,length=1000000>\n",
+        header + "".join(f"\tS{sample}" for sample in range(samples)) + "\n",
+        *(
+            f"1\t{position}\t.\tA\tG\t.\t.\t.\tGT" + "\t0/0" * samples + "\n"
+            for position in range(100, 105)
+        ),
+    ]
+    path = tmp_path / "wide.vcf.gz"
+    with BgzfWriter(path, index=TBI, columns=Columns.VCF) as writer:
+        for line in lines:
+            writer.write(line.encode())
+    assert_identical(Path(f"{path}.tbi"), htslib_index(path, TBI, "-p", "vcf"))
+
+
 SAM = """@HD\tVN:1.6\tSO:coordinate
 @SQ\tSN:chr1\tLN:248956422
 @SQ\tSN:chr2\tLN:242193529

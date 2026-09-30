@@ -310,8 +310,8 @@ impl Indexer {
             self.pending.pop_front();
         }
         let needed = match (&self.builder, self.pending.front()) {
-            (_, Some(record)) => record.end_position.block,
-            (None, None) => self.first_offset.block,
+            (None, _) => self.first_offset.block,
+            (Some(_), Some(record)) => record.end_position.block,
             (Some(_), None) => blocks.position().block,
         };
         blocks.forget_before(needed);
@@ -765,6 +765,21 @@ mod tests {
         assert_eq!(csi_bins(14, (1 << 62) - 256), Ok((35, 9)));
         assert!(csi_bins(14, (1 << 62) - 255).is_err());
         assert!(csi_bins(14, i64::MAX).is_err());
+    }
+
+    #[test]
+    fn a_first_record_ending_blocks_after_the_header_is_indexed() {
+        let dir = tempfile::tempdir().unwrap();
+        let options = options(&dir, IndexFormat::Tabix, Some(Columns::bed()));
+        let mut writer = Writer::new(Vec::new(), 1, 1, Some(options)).unwrap();
+        writer.write(b"#header\n").unwrap();
+        let mut line = b"chr1\t1\t2\t".to_vec();
+        line.resize(3 * BLOCK_SIZE, b'x');
+        line.push(b'\n');
+        writer.write(&line).unwrap();
+        writer.write(b"chr1\t5\t6\n").unwrap();
+        writer.finish().unwrap();
+        assert!(dir.path().join("out.bed.gz.idx").exists());
     }
 
     #[test]
