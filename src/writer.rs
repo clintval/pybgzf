@@ -498,9 +498,12 @@ impl<W: Write> Writer<W> {
 
     fn write_unchecked(&mut self, data: &[u8]) -> Result<()> {
         let Some(indexer) = &mut self.indexer else {
-            return Ok(self.blocks.write(data)?);
+            self.blocks.write(data)?;
+            self.blocks.forget_before(u64::MAX);
+            return Ok(());
         };
         let mut rest = data;
+        let mut block = self.blocks.position().block;
         while let Some(newline) = memchr(b'\n', rest) {
             let mut line = std::mem::take(&mut indexer.partial);
             let classified = if line.is_empty() {
@@ -515,6 +518,10 @@ impl<W: Write> Writer<W> {
             self.blocks.write(&rest[..=newline])?;
             indexer.commit(record, self.blocks.position());
             rest = &rest[newline + 1..];
+            if self.blocks.position().block != block {
+                block = self.blocks.position().block;
+                indexer.resolve(&mut self.blocks);
+            }
         }
         self.blocks.write(rest)?;
         indexer.partial.extend_from_slice(rest);
@@ -795,6 +802,25 @@ mod tests {
         writer.write(b"chr1\t5\t6\n").unwrap();
         writer.finish().unwrap();
         assert!(dir.path().join("out.bed.gz.idx").exists());
+    }
+
+    #[test]
+    fn memory_stays_bounded_within_one_large_write() {
+        let data: Vec<u8> = (0..200_000)
+            .flat_map(|i| format!("chr1\t{i}\t{}\n", i + 5).into_bytes())
+            .collect();
+        for threads in [1, 3] {
+            let dir = tempfile::tempdir().unwrap();
+            let options = options(&dir, IndexFormat::Tabix, Some(Columns::bed()));
+            let mut writer = Writer::new(Vec::new(), 1, threads, Some(options)).unwrap();
+            writer.write(&data).unwrap();
+            let pending = writer.indexer.as_ref().unwrap().pending.len();
+            assert!(pending < 50_000, "threads={threads} pending={pending}");
+            writer.finish().unwrap();
+            let mut writer = Writer::new(Vec::new(), 1, threads, None).unwrap();
+            writer.write(&data).unwrap();
+            assert!(writer.blocks.remembered_blocks() <= 1, "threads={threads}");
+        }
     }
 
     #[test]

@@ -235,6 +235,11 @@ impl<W: Write> BlockWriter<W> {
         }
     }
 
+    #[cfg(test)]
+    pub(crate) fn remembered_blocks(&self) -> usize {
+        self.window.len()
+    }
+
     fn check_open(&self) -> io::Result<()> {
         if self.finished {
             return Err(io::Error::other("the BGZF stream is already finished"));
