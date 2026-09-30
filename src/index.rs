@@ -20,9 +20,13 @@ use crate::khash::KhashOrder;
 const MIN_MARKER_DISTANCE: u64 = 0x10000;
 const UNSET: u64 = u64::MAX;
 
-/// The largest position a binning index with these parameters can hold.
+/// The largest position a binning index with these parameters can hold, saturating at
+/// `i64::MAX`.
 pub fn max_position(min_shift: u32, depth: u32) -> i64 {
-    1_i64 << (min_shift + depth * 3)
+    match min_shift.saturating_add(depth.saturating_mul(3)) {
+        shift @ 0..63 => 1_i64 << shift,
+        _ => i64::MAX,
+    }
 }
 
 fn bin_first(level: u32) -> u32 {

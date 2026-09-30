@@ -86,20 +86,34 @@ fn longest(line: &[u8], prefix: &[u8], key: &[u8], skip_padding: bool) -> Option
         value = &value[padding..];
     }
     let digits = value.iter().take_while(|b| b.is_ascii_digit()).count();
-    std::str::from_utf8(&value[..digits]).ok()?.parse().ok()
+    if digits == 0 {
+        return None;
+    }
+    Some(value[..digits].iter().fold(0_i64, |total, digit| {
+        total
+            .saturating_mul(10)
+            .saturating_add(i64::from(digit - b'0'))
+    }))
 }
 
-fn csi_bins(mut min_shift: u32, longest_reference: i64) -> (u32, u32) {
+fn csi_bins(mut min_shift: u32, longest_reference: i64) -> std::result::Result<(u32, u32), String> {
     const MAX_DEPTH: u32 = 9;
+    const MAX_SHIFT: u32 = 62;
     if longest_reference <= 0 {
         let depth = match min_shift {
             0..10 => MAX_DEPTH,
             10..25 => MAX_DEPTH - (min_shift - 10) / 3,
             _ => 4,
         };
-        return (min_shift, depth);
+        return Ok((min_shift, depth));
     }
-    let needed = longest_reference + 256;
+    let needed = longest_reference.saturating_add(256);
+    if needed > 1_i64 << MAX_SHIFT {
+        return Err(format!(
+            "a reference of length {longest_reference} in the header is too long for a CSI index, which holds up to {}",
+            (1_i64 << MAX_SHIFT) - 256
+        ));
+    }
     let mut depth = (TABIX_MAX_SHIFT + 2).saturating_sub(min_shift) / 3;
     if needed <= max_position(min_shift, MAX_DEPTH) {
         while needed > max_position(min_shift, depth) {
@@ -111,7 +125,7 @@ fn csi_bins(mut min_shift: u32, longest_reference: i64) -> (u32, u32) {
             min_shift += 1;
         }
     }
-    (min_shift, depth)
+    Ok((min_shift, depth))
 }
 
 fn trim_line(line: &[u8]) -> &[u8] {
@@ -155,13 +169,13 @@ impl Indexer {
         }
     }
 
-    fn decide_bins(&self, columns: &Columns) -> (u32, u32) {
+    fn decide_bins(&self, columns: &Columns) -> std::result::Result<(u32, u32), String> {
         match self.format {
-            IndexFormat::Tabix => (TABIX_MIN_SHIFT, TABIX_DEPTH),
+            IndexFormat::Tabix => Ok((TABIX_MIN_SHIFT, TABIX_DEPTH)),
             IndexFormat::Csi {
                 min_shift,
                 depth: Some(depth),
-            } => (min_shift, depth),
+            } => Ok((min_shift, depth)),
             IndexFormat::Csi {
                 min_shift,
                 depth: None,
@@ -209,7 +223,12 @@ impl Indexer {
         let interval = columns
             .parse(line)
             .map_err(|e| format!("line {number}: {e}"))?;
-        let (min_shift, depth) = self.bins.unwrap_or_else(|| self.decide_bins(&columns));
+        let (min_shift, depth) = match self.bins {
+            Some(bins) => bins,
+            None => self
+                .decide_bins(&columns)
+                .map_err(|e| format!("line {number}: {e}"))?,
+        };
         let name = interval.name;
         let limit = max_position(min_shift, depth);
         if interval.beg > limit || interval.end > limit {
@@ -704,11 +723,14 @@ mod tests {
 
     #[test]
     fn csi_bins_follow_htslib() {
-        assert_eq!(csi_bins(14, 0), (14, 8));
-        assert_eq!(csi_bins(10, 0), (10, 9));
-        assert_eq!(csi_bins(14, 248_956_422), (14, 6));
-        assert_eq!(csi_bins(14, 1 << 33), (14, 7));
-        assert_eq!(csi_bins(4, 1 << 40), (14, 9));
+        assert_eq!(csi_bins(14, 0), Ok((14, 8)));
+        assert_eq!(csi_bins(10, 0), Ok((10, 9)));
+        assert_eq!(csi_bins(14, 248_956_422), Ok((14, 6)));
+        assert_eq!(csi_bins(14, 1 << 33), Ok((14, 7)));
+        assert_eq!(csi_bins(4, 1 << 40), Ok((14, 9)));
+        assert_eq!(csi_bins(14, (1 << 62) - 256), Ok((35, 9)));
+        assert!(csi_bins(14, (1 << 62) - 255).is_err());
+        assert!(csi_bins(14, i64::MAX).is_err());
     }
 
     #[test]
@@ -729,6 +751,10 @@ mod tests {
         assert_eq!(
             longest(b"##INFO=<ID=x>", b"##contig", b"length", true),
             None
+        );
+        assert_eq!(
+            longest(b"@SQ\tLN:99999999999999999999", b"@SQ", b"\tLN:", false),
+            Some(i64::MAX)
         );
     }
 }

@@ -469,3 +469,28 @@ def test_bed_accepts_lines_without_an_end(tmp_path: Path) -> None:
         with pybgzf.open(path, index=IndexFormat.TBI, columns=columns) as handle:
             handle.write("chr1\t5\nchr1\t9\t20\n")
         assert Path(f"{path}.tbi").exists()
+
+
+@pytest.mark.parametrize(
+    "header",
+    [
+        "##fileformat=VCFv4.3\n##contig=<ID=chr1,length=4611686018427387904>\n",
+        "##fileformat=VCFv4.3\n##contig=<ID=chr1,length=9223372036854775807>\n",
+        "##fileformat=VCFv4.3\n##contig=<ID=chr1,length=99999999999999999999>\n",
+    ],
+)
+def test_references_too_long_for_csi_raise(tmp_path: Path, header: str) -> None:
+    path = tmp_path / "long.vcf.gz"
+    with BgzfWriter(path, index=IndexFormat.CSI, columns=Columns.VCF) as writer:
+        writer.write(header.encode())
+        with pytest.raises(ValueError, match="too long for a CSI index"):
+            writer.write(b"chr1\t100\t.\tA\tT\t.\t.\t.\n")
+    assert not Path(f"{path}.csi").exists()
+
+
+def test_sam_references_too_long_for_csi_raise(tmp_path: Path) -> None:
+    path = tmp_path / "long.sam.gz"
+    with BgzfWriter(path, index=IndexFormat.CSI, columns=Columns.SAM) as writer:
+        writer.write(b"@SQ\tSN:chr1\tLN:4611686018427387904\n")
+        with pytest.raises(ValueError, match="too long for a CSI index"):
+            writer.write(b"r\t0\tchr1\t5\t60\t4M\t*\t0\t0\tACGT\tIIII\n")

@@ -164,6 +164,15 @@ def test_vcf_csi_depth_follows_contig_lengths(tmp_path: Path) -> None:
     assert read_index(tmp_path / "a.vcf.gz.csi").depth == 8
 
 
+@requires_htslib_1_23
+@pytest.mark.parametrize(("length", "min_shift"), [(2**60, 34), (2**62 - 256, 35)])
+def test_csi_min_shift_grows_for_long_contigs(tmp_path: Path, length: int, min_shift: int) -> None:
+    text = VCF.replace("length=249250621", f"length={length}")
+    ours = write(tmp_path / "a.vcf.gz", text, CSI, Columns.VCF)
+    assert (read_index(ours).min_shift, read_index(ours).depth) == (min_shift, 9)
+    assert_identical(ours, htslib_index(tmp_path / "a.vcf.gz", CSI, "-p", "vcf"))
+
+
 SAM = """@HD\tVN:1.6\tSO:coordinate
 @SQ\tSN:chr1\tLN:248956422
 @SQ\tSN:chr2\tLN:242193529
