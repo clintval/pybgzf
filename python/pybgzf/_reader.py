@@ -35,6 +35,7 @@ class BgzfReader(io.RawIOBase):
     plus the offset into that block's decompressed data, as stored in tabix and CSI indexes.
     `tell()` returns one and `seek()` accepts one, but `seekable()` is False because virtual
     offsets cannot be added to or subtracted from like byte offsets.
+    Data that ends without the BGZF end-of-file marker is read, with a `TruncatedWarning`.
 
     Args:
         src: A path to open, or a readable binary file-like object such as a pipe.
@@ -163,6 +164,7 @@ class IndexedReader:
 
     Lines are parsed with the columns and header character recorded in the index, and a query
     returns what `tabix path ref:start+1-end` prints, in the same order.
+    A file that ends without the BGZF end-of-file marker warns with `TruncatedWarning` when opened.
 
     Args:
         path: The BGZF file.

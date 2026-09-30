@@ -124,6 +124,7 @@ addopts    = [
     "--import-mode=importlib",
 ]
 doctest_plus = "enabled"
+filterwarnings = ["error"]
 doctest_optionflags = [
     "ELLIPSIS",
     "IGNORE_EXCEPTION_DETAIL",

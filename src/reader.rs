@@ -5,8 +5,8 @@ use std::io::{self, BufRead, BufReader, Read, Seek, SeekFrom};
 use std::num::NonZero;
 use std::panic::{self, AssertUnwindSafe};
 use std::path::Path;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, PoisonError};
 
 use indexmap::IndexSet;
 use noodles_bgzf::VirtualPosition;
@@ -24,21 +24,45 @@ use crate::index::max_position;
 
 const FILE_BUFFER: usize = 128 * 1024;
 
+/// The empty block that ends every complete BGZF file.
+const EOF_MARKER: [u8; 28] = [
+    0x1f, 0x8b, 0x08, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0xff, 0x06, 0x00, 0x42, 0x43, 0x02, 0x00,
+    0x1b, 0x00, 0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+];
+
+/// Returns whether a file ends with the BGZF end-of-file marker.
+pub fn ends_with_eof_marker(path: &Path) -> io::Result<bool> {
+    let mut file = File::open(path)?;
+    let Some(start) = file.metadata()?.len().checked_sub(EOF_MARKER.len() as u64) else {
+        return Ok(false);
+    };
+    let mut tail = [0_u8; EOF_MARKER.len()];
+    let _ = file.seek(SeekFrom::Start(start))?;
+    file.read_exact(&mut tail)?;
+    Ok(tail == EOF_MARKER)
+}
+
 /// Keeps reads off a noodles fast path that repeats the last block at the end of a stream
 /// without an end-of-file marker.
 const SERIAL_READ_LIMIT: usize = u16::MAX as usize;
 
 /// A source that counts the compressed bytes read from it, so that bytes after the last complete
-/// block, such as a truncated block header, are noticed.
+/// block, such as a truncated block header, are noticed, and keeps the last bytes read, so that a
+/// missing end-of-file marker is noticed.
 struct Tracked<R> {
     inner: R,
     offset: Arc<AtomicU64>,
+    tail: Arc<Mutex<Vec<u8>>>,
 }
 
 impl<R: Read> Read for Tracked<R> {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         let n = self.inner.read(buf)?;
         self.offset.fetch_add(n as u64, Ordering::Relaxed);
+        let mut tail = self.tail.lock().unwrap_or_else(PoisonError::into_inner);
+        tail.extend_from_slice(&buf[n.saturating_sub(EOF_MARKER.len())..n]);
+        let excess = tail.len().saturating_sub(EOF_MARKER.len());
+        drop(tail.drain(..excess));
         Ok(n)
     }
 }
@@ -47,6 +71,10 @@ impl<R: Seek> Seek for Tracked<R> {
     fn seek(&mut self, position: SeekFrom) -> io::Result<u64> {
         let offset = self.inner.seek(position)?;
         self.offset.store(offset, Ordering::Relaxed);
+        self.tail
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clear();
         Ok(offset)
     }
 }
@@ -63,6 +91,8 @@ pub struct BgzfReader<R: Read + Seek + Send + 'static> {
     inner: Inner<R>,
     threads: NonZero<usize>,
     offset: Arc<AtomicU64>,
+    tail: Arc<Mutex<Vec<u8>>>,
+    missing_eof_marker: Option<bool>,
 }
 
 fn parallel<R: Read + Send + 'static>(
@@ -98,14 +128,18 @@ impl<R: Read + Seek + Send + 'static> BgzfReader<R> {
     /// Reads BGZF from `source`, decompressing on `threads` worker threads when more than one.
     pub fn new(source: R, threads: NonZero<usize>) -> io::Result<Self> {
         let offset = Arc::new(AtomicU64::new(0));
+        let tail = Arc::new(Mutex::new(Vec::with_capacity(2 * EOF_MARKER.len())));
         let source = Tracked {
             inner: source,
             offset: Arc::clone(&offset),
+            tail: Arc::clone(&tail),
         };
         let mut reader = Self {
             inner: Inner::Failed { position: 0 },
             threads,
             offset,
+            tail,
+            missing_eof_marker: None,
         };
         reader.start(source)?;
         Ok(reader)
@@ -212,6 +246,16 @@ impl<R: Read + Seek + Send + 'static> BgzfReader<R> {
         Ok(filled)
     }
 
+    /// Returns true the first time the stream is found to end without the BGZF end-of-file
+    /// marker, which means it may be truncated at a block boundary.
+    pub fn take_missing_eof_marker(&mut self) -> bool {
+        if self.missing_eof_marker == Some(true) {
+            self.missing_eof_marker = Some(false);
+            return true;
+        }
+        false
+    }
+
     /// Returns true if blocks are read ahead on another thread, which may be waiting for data.
     pub fn reads_ahead(&self) -> bool {
         matches!(self.inner, Inner::Parallel(_))
@@ -246,6 +290,12 @@ impl<R: Read + Seek + Send + 'static> BgzfReader<R> {
             let position = self.virtual_position();
             let source = self.stop()?;
             self.inner = Inner::Exhausted { source, position };
+        }
+        if self.missing_eof_marker.is_none() {
+            let tail = self.tail.lock().unwrap_or_else(PoisonError::into_inner);
+            if !tail.is_empty() && !EOF_MARKER.ends_with(&tail) {
+                self.missing_eof_marker = Some(true);
+            }
         }
         Ok(())
     }
@@ -639,6 +689,25 @@ mod tests {
             reader.read_to_end(&mut out).unwrap();
             assert_eq!(out, data);
         }
+    }
+
+    #[test]
+    fn a_missing_end_of_file_marker_is_reported_once_with_any_thread_count() {
+        let data = bed(20_000);
+        let (_dir, path, _) = written(&data, IndexFormat::Tabix);
+        let compressed = std::fs::read(&path).unwrap();
+        let cut = compressed[..compressed.len() - EOF_MARKER.len()].to_vec();
+        for n in [1, 3] {
+            let mut complete =
+                BgzfReader::new(Cursor::new(compressed.clone()), threads(n)).unwrap();
+            let _ = complete.read_to_end(&mut Vec::new()).unwrap();
+            assert!(!complete.take_missing_eof_marker(), "threads={n}");
+            let mut reader = BgzfReader::new(Cursor::new(cut.clone()), threads(n)).unwrap();
+            let _ = reader.read_to_end(&mut Vec::new()).unwrap();
+            assert!(reader.take_missing_eof_marker(), "threads={n}");
+            assert!(!reader.take_missing_eof_marker(), "threads={n}");
+        }
+        assert!(ends_with_eof_marker(&path).unwrap());
     }
 
     #[test]

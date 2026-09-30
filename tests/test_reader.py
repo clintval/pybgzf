@@ -4,6 +4,7 @@ import os
 import random
 import shutil
 import threading
+import warnings
 from pathlib import Path
 from typing import cast
 
@@ -325,6 +326,7 @@ def test_corrupt_input_raises(
         handle.read()
 
 
+@pytest.mark.filterwarnings("ignore::pybgzf.TruncatedWarning")
 @pytest.mark.parametrize("kind", CORRUPTIONS)
 @pytest.mark.parametrize("threads", [1, 4])
 def test_corrupt_input_raises_from_queries(
@@ -424,11 +426,90 @@ def test_reads_files_without_an_end_of_file_marker(data_dir: Path, threads: int)
     compressed = bed_path(data_dir, IndexFormat.TBI).read_bytes()
     expected = gzip.decompress(compressed)
     chunks: list[bytes] = []
-    with BgzfReader(io.BytesIO(compressed[:-28]), threads=threads) as reader:
+    with (
+        pytest.warns(pybgzf.TruncatedWarning, match="without an end-of-file marker") as caught,
+        BgzfReader(io.BytesIO(compressed[:-28]), threads=threads) as reader,
+    ):
         for _ in range(len(expected) // 65536 + 2):
             chunks.append(reader.read(65536))
     assert b"".join(chunks) == expected
     assert chunks[-1] == b""
+    assert len(caught) == 1
+
+
+@pytest.mark.parametrize("threads", [1, 3])
+def test_complete_files_do_not_warn(data_dir: Path, threads: int) -> None:
+    path = bed_path(data_dir, IndexFormat.TBI)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        with BgzfReader(path, threads=threads) as reader:
+            end = len(reader.readall())
+            assert reader.read(1) == b""
+            assert end > 0
+        with pybgzf.reader(path, threads=threads) as handle:
+            assert handle.read()
+        with BgzfReader(io.BytesIO(b""), threads=threads) as reader:
+            assert reader.readall() == b""
+
+
+@pytest.mark.parametrize("threads", [1, 3])
+def test_a_path_without_an_end_of_file_marker_warns_naming_it(
+    data_dir: Path, threads: int, tmp_path: Path
+) -> None:
+    path = tmp_path / "cut.bed.gz"
+    _ = path.write_bytes(bed_path(data_dir, IndexFormat.TBI).read_bytes()[:-28])
+    with (
+        pytest.warns(pybgzf.TruncatedWarning, match="cut.bed.gz"),
+        pybgzf.reader(path, threads=threads) as handle,
+    ):
+        assert handle.read()
+
+
+@pytest.mark.parametrize("threads", [1, 3])
+def test_a_pipe_without_an_end_of_file_marker_warns(data_dir: Path, threads: int) -> None:
+    compressed = bed_path(data_dir, IndexFormat.TBI).read_bytes()
+    read_end, write_end = os.pipe()
+
+    def write() -> None:
+        with os.fdopen(write_end, "wb") as sink:
+            _ = sink.write(compressed[:-28])
+
+    writer = threading.Thread(target=write, daemon=True)
+    writer.start()
+    with (
+        pytest.warns(pybgzf.TruncatedWarning),
+        os.fdopen(read_end, "rb") as source,
+        BgzfReader(source, threads=threads) as reader,
+    ):
+        assert reader.readall() == gzip.decompress(compressed)
+    writer.join(30)
+    assert not writer.is_alive()
+
+
+def test_a_missing_end_of_file_marker_raises_when_warnings_are_errors(data_dir: Path) -> None:
+    compressed = bed_path(data_dir, IndexFormat.TBI).read_bytes()
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", pybgzf.TruncatedWarning)
+        with (
+            BgzfReader(io.BytesIO(compressed[:-28])) as reader,
+            pytest.raises(pybgzf.TruncatedWarning),
+        ):
+            _ = reader.readall()
+
+
+@pytest.mark.parametrize("index", [IndexFormat.TBI, IndexFormat.CSI])
+def test_an_indexed_file_without_an_end_of_file_marker_warns_when_opened(
+    data_dir: Path, index: IndexFormat, tmp_path: Path
+) -> None:
+    source = bed_path(data_dir, index)
+    suffix = ".tbi" if index is IndexFormat.TBI else ".csi"
+    path = tmp_path / "cut.bed.gz"
+    _ = path.write_bytes(source.read_bytes()[:-28])
+    _ = shutil.copyfile(f"{source}{suffix}", f"{path}{suffix}")
+    with pytest.warns(pybgzf.TruncatedWarning, match="cut.bed.gz"):
+        reader = IndexedReader(path)
+    with reader:
+        assert list(reader.query("chr1", 0, 1 << 20))
 
 
 def block_starts(data: bytes) -> list[int]:
@@ -545,6 +626,7 @@ def test_open_reader_checks_the_encoding_first(data_dir: Path) -> None:
         pybgzf.reader(bed_path(data_dir, IndexFormat.TBI), threads=2, encoding="no-such-codec")
 
 
+@pytest.mark.filterwarnings("ignore::pybgzf.TruncatedWarning")
 @pytest.mark.parametrize("threads", [1, 3])
 def test_errors_name_the_file(tmp_path: Path, data_dir: Path, threads: int) -> None:
     missing = tmp_path / "missing.gz"
