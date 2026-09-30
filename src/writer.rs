@@ -574,7 +574,7 @@ impl<W: Write> Writer<W> {
         self.finished = true;
         let Some(mut indexer) = self.indexer.take() else {
             self.check_io()?;
-            return self.blocks.finish().map(drop).map_err(Error::Io);
+            return self.blocks.finish(true).map(drop).map_err(Error::Io);
         };
         let reported = indexer.failure.is_some();
         match self.finish_indexed(&mut indexer) {
@@ -603,10 +603,10 @@ impl<W: Write> Writer<W> {
             indexer.failure = Some(NO_COLUMNS.into());
         }
         if let Some(message) = indexer.failure.take() {
-            self.blocks.abandon()?;
+            self.blocks.finish(false)?;
             return Err(Error::Invalid(message));
         }
-        let final_offset = self.blocks.finish()?;
+        let final_offset = self.blocks.finish(true)?;
         indexer.resolve(&mut self.blocks);
         let first_offset = self
             .blocks

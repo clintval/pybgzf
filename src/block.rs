@@ -156,32 +156,22 @@ impl<W: Write> BlockWriter<W> {
     /// Ends the current block, waits for every block to be written, and flushes the sink.
     pub fn flush(&mut self) -> io::Result<()> {
         self.end_block()?;
-        self.wait_all()?;
+        self.drain(0)?;
         self.sink.flush()
     }
 
     /// Returns the virtual position of the next byte, waiting for earlier blocks to be written.
     pub fn tell(&mut self) -> io::Result<u64> {
         self.check_open()?;
-        self.wait_all()?;
+        self.drain(0)?;
         Ok((self.bytes_written << 16) | self.buf.len() as u64)
     }
 
-    /// Writes all remaining data and the BGZF end-of-file marker, returning the virtual position
-    /// of the marker.
-    pub fn finish(&mut self) -> io::Result<u64> {
-        self.finish_with(true)
-    }
-
-    /// Writes all remaining data but no end-of-file marker, so that readers see the stream as
-    /// truncated, returning the virtual position where the marker would be.
-    pub fn abandon(&mut self) -> io::Result<u64> {
-        self.finish_with(false)
-    }
-
-    fn finish_with(&mut self, eof: bool) -> io::Result<u64> {
+    /// Writes all remaining data and, if `eof`, the BGZF end-of-file marker, returning the
+    /// virtual position of the marker. Without it, readers see the stream as truncated.
+    pub fn finish(&mut self, eof: bool) -> io::Result<u64> {
         self.end_block()?;
-        self.wait_all()?;
+        self.drain(0)?;
         self.stop_workers();
         let eof_start = self.bytes_written;
         if eof {
@@ -267,26 +257,16 @@ impl<W: Write> BlockWriter<W> {
                 ..
             } => {
                 let (reply, receiver) = bounded(1);
-                let jobs = jobs
+                if jobs
                     .as_ref()
-                    .ok_or_else(|| io::Error::other("compression workers have stopped"))?;
-                jobs.send((input, output, reply))
-                    .map_err(|_| io::Error::other("compression workers have stopped"))?;
+                    .is_none_or(|jobs| jobs.send((input, output, reply)).is_err())
+                {
+                    return Err(io::Error::other("compression workers have stopped"));
+                }
                 pending.push_back(receiver);
                 let max_pending = *max_pending;
-                self.drain(false)?;
-                while self.pending() > max_pending {
-                    self.drain_one()?;
-                }
-                Ok(())
+                self.drain(max_pending)
             }
-        }
-    }
-
-    fn pending(&self) -> usize {
-        match &self.engine {
-            Engine::Serial(_) => 0,
-            Engine::Parallel { pending, .. } => pending.len(),
         }
     }
 
@@ -302,20 +282,10 @@ impl<W: Write> BlockWriter<W> {
         Ok(())
     }
 
-    fn drain_one(&mut self) -> io::Result<()> {
-        let Engine::Parallel { pending, .. } = &mut self.engine else {
-            return Ok(());
-        };
-        let Some(receiver) = pending.pop_front() else {
-            return Ok(());
-        };
-        let (input, output) = receiver
-            .recv()
-            .map_err(|_| io::Error::other("a compression worker exited unexpectedly"))??;
-        self.emit(input, output)
-    }
-
-    fn drain(&mut self, block: bool) -> io::Result<()> {
+    /// Writes compressed blocks in order: those already compressed and, while more than
+    /// `max_pending` are pending, the next one once it is compressed.
+    fn drain(&mut self, max_pending: usize) -> io::Result<()> {
+        let exited = || io::Error::other("a compression worker exited unexpectedly");
         loop {
             let Engine::Parallel { pending, .. } = &mut self.engine else {
                 return Ok(());
@@ -323,26 +293,19 @@ impl<W: Write> BlockWriter<W> {
             let Some(receiver) = pending.front() else {
                 return Ok(());
             };
-            if !block {
+            let result = if pending.len() > max_pending {
+                receiver.recv().map_err(|_| exited())?
+            } else {
                 match receiver.try_recv() {
-                    Ok(result) => {
-                        pending.pop_front();
-                        let (input, output) = result?;
-                        self.emit(input, output)?;
-                        continue;
-                    }
+                    Ok(result) => result,
                     Err(TryRecvError::Empty) => return Ok(()),
-                    Err(TryRecvError::Disconnected) => {
-                        return Err(io::Error::other("a compression worker exited unexpectedly"));
-                    }
+                    Err(TryRecvError::Disconnected) => return Err(exited()),
                 }
-            }
-            self.drain_one()?;
+            };
+            pending.pop_front();
+            let (input, output) = result?;
+            self.emit(input, output)?;
         }
-    }
-
-    fn wait_all(&mut self) -> io::Result<()> {
-        self.drain(true)
     }
 
     fn stop_workers(&mut self) {
@@ -408,7 +371,7 @@ mod tests {
     #[test]
     fn empty_stream_is_only_the_eof_marker() {
         let mut writer = BlockWriter::new(Vec::new(), level(6), threads(1)).unwrap();
-        assert_eq!(writer.finish().unwrap(), 0);
+        assert_eq!(writer.finish(true).unwrap(), 0);
         assert_eq!(writer.get_ref().len(), 28);
         assert!(decompress(writer.get_ref()).is_empty());
     }
@@ -422,7 +385,7 @@ mod tests {
             for chunk in data.chunks(10_007) {
                 writer.write(chunk).unwrap();
             }
-            writer.finish().unwrap();
+            writer.finish(true).unwrap();
             assert_eq!(decompress(writer.get_ref()), data);
             outputs.push(writer.get_ref().clone());
         }
@@ -439,7 +402,7 @@ mod tests {
                 marks.push(writer.position());
             }
             writer.write(b"x").unwrap();
-            writer.finish().unwrap();
+            writer.finish(true).unwrap();
             let starts = block_starts(writer.get_ref());
             for mark in marks {
                 let expected = (starts[mark.block as usize] << 16) | u64::from(mark.offset);
@@ -474,7 +437,7 @@ mod tests {
             writer.flush().unwrap();
             writer.write(b"chr1\t2\t3\n").unwrap();
             let end_of_second = writer.position();
-            let eof = writer.finish().unwrap();
+            let eof = writer.finish(true).unwrap();
             let starts = block_starts(writer.get_ref());
             assert_eq!(writer.resolve(end_of_first), Some(starts[1] << 16));
             assert_eq!(writer.resolve(end_of_second), Some(eof));
@@ -504,7 +467,7 @@ mod tests {
             assert_eq!(writer.tell().unwrap(), 0);
             writer.write(&sample(BLOCK_SIZE + 10)).unwrap();
             let told = writer.tell().unwrap();
-            writer.finish().unwrap();
+            writer.finish(true).unwrap();
             let starts = block_starts(writer.get_ref());
             assert_eq!(told, (starts[1] << 16) | 10);
         }
@@ -528,7 +491,7 @@ mod tests {
         let data = sample(BLOCK_SIZE * 2);
         let mut writer = BlockWriter::new(Vec::new(), level(0), threads(2)).unwrap();
         writer.write(&data).unwrap();
-        writer.finish().unwrap();
+        writer.finish(true).unwrap();
         assert_eq!(decompress(writer.get_ref()), data);
     }
 
@@ -549,7 +512,7 @@ mod tests {
             let mut writer = BlockWriter::new(Broken, level(6), threads(n)).unwrap();
             let result = writer
                 .write(&sample(BLOCK_SIZE * 8))
-                .and_then(|()| writer.finish().map(drop));
+                .and_then(|()| writer.finish(true).map(drop));
             assert_eq!(result.unwrap_err().kind(), io::ErrorKind::BrokenPipe);
         }
     }
