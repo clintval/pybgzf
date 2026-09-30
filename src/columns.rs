@@ -3,7 +3,19 @@
 use memchr::{memchr, memmem};
 
 /// How a line's end is found, and the format code written to the index header.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(
+    feature = "python",
+    pyo3::pyclass(
+        module = "pybgzf._pybgzf",
+        name = "LineKind",
+        rename_all = "UPPERCASE",
+        eq,
+        frozen,
+        hash,
+        from_py_object
+    )
+)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Kind {
     Generic,
     Sam,

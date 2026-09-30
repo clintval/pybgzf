@@ -38,47 +38,20 @@ fn warn_truncated(py: Python<'_>, path: Option<&Path>) -> PyResult<()> {
     PyErr::warn(py, &py.get_type::<TruncatedWarning>(), &message, 1)
 }
 
-type ColumnsTuple = (i64, i64, Option<i64>, bool, String, i64, LineKind);
-
-/// The value of each `pybgzf.LineFormat` member.
-#[pyclass(module = "pybgzf._pybgzf", eq, frozen, hash, from_py_object)]
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
-enum LineKind {
-    #[pyo3(name = "GENERIC")]
-    Generic,
-    #[pyo3(name = "SAM")]
-    Sam,
-    #[pyo3(name = "VCF")]
-    Vcf,
-}
-
-impl From<LineKind> for Kind {
-    fn from(kind: LineKind) -> Self {
-        match kind {
-            LineKind::Generic => Kind::Generic,
-            LineKind::Sam => Kind::Sam,
-            LineKind::Vcf => Kind::Vcf,
-        }
-    }
-}
-
-impl From<Kind> for LineKind {
-    fn from(kind: Kind) -> Self {
-        match kind {
-            Kind::Generic => LineKind::Generic,
-            Kind::Sam => LineKind::Sam,
-            Kind::Vcf => LineKind::Vcf,
-        }
-    }
-}
+type ColumnsTuple = (i64, i64, Option<i64>, bool, String, i64, Kind);
 
 /// The value of each `pybgzf.IndexFormat` member.
-#[pyclass(module = "pybgzf._pybgzf", eq, frozen, hash, from_py_object)]
+#[pyclass(
+    module = "pybgzf._pybgzf",
+    rename_all = "UPPERCASE",
+    eq,
+    frozen,
+    hash,
+    from_py_object
+)]
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 enum IndexKind {
-    #[pyo3(name = "TBI")]
-    Tabix,
-    #[pyo3(name = "CSI")]
+    Tbi,
     Csi,
 }
 
@@ -154,7 +127,6 @@ fn columns_from_tuple(columns: ColumnsTuple) -> PyResult<Columns> {
             ));
         }
     };
-    let kind = Kind::from(kind);
     let columns = Columns {
         refname,
         start,
@@ -176,7 +148,7 @@ fn columns_to_tuple(columns: &Columns) -> ColumnsTuple {
         columns.zero_based,
         char::from(columns.meta_char).to_string(),
         columns.skip_lines as i64,
-        LineKind::from(columns.kind),
+        columns.kind,
     )
 }
 
@@ -216,7 +188,7 @@ impl Writer {
             }
             Some(kind) => {
                 let format = match kind {
-                    IndexKind::Tabix => IndexFormat::Tabix,
+                    IndexKind::Tbi => IndexFormat::Tabix,
                     IndexKind::Csi => csi_format(csi_min_shift, csi_depth).map_err(to_python)?,
                 };
                 if columns.is_none() && !infer {
@@ -710,7 +682,7 @@ fn _pybgzf(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<QueryIterator>()?;
     module.add_class::<Sniffer>()?;
     module.add_class::<IndexKind>()?;
-    module.add_class::<LineKind>()?;
+    module.add_class::<Kind>()?;
     module.add_function(wrap_pyfunction!(validate_columns, module)?)?;
     module.add("BLOCK_SIZE", crate::block::BLOCK_SIZE)?;
     module.add(
