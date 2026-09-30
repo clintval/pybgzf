@@ -48,11 +48,7 @@ uv run poe fix-all
 
 ## Benchmarks
 
-Compare against the standard library's `gzip` and, if installed, `bgzip` and `tabix` with:
-
-```console
-uv run python benchmarks/benchmark.py 200
-```
+See [`benchmarks/README.md`](benchmarks/README.md) for how to run them and recent results.
 
 ## Releasing
 
