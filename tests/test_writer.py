@@ -133,6 +133,9 @@ INVALID_OPTIONS: list[tuple[Callable[[Path], BgzfWriter], str]] = [
     (lambda path: BgzfWriter(path, level=13), "level"),
     (lambda path: BgzfWriter(path, threads=0), "threads"),
     (lambda path: BgzfWriter(path, threads=100_000), "threads must be between 1 and 1024"),
+    (lambda path: BgzfWriter(path, threads=-1), "threads must be between 1 and 1024"),
+    (lambda path: BgzfWriter(path, level=-1), "level must be between 0 and 12, not -1"),
+    (lambda path: BgzfWriter(path, level=256), "level must be between 0 and 12, not 256"),
     (
         lambda path: BgzfWriter(path, index=IndexFormat.TBI),
         "columns is required when index is set",
@@ -140,6 +143,14 @@ INVALID_OPTIONS: list[tuple[Callable[[Path], BgzfWriter], str]] = [
     (lambda path: BgzfWriter(path, index_path="x.tbi"), "only used when index is set"),
     (lambda path: BgzfWriter(path, index=CSI, columns=BED, csi_min_shift=0), "csi_min_shift"),
     (lambda path: BgzfWriter(path, index=CSI, columns=BED, csi_depth=12), "csi_depth"),
+    (
+        lambda path: BgzfWriter(path, index=CSI, columns=BED, csi_min_shift=-1),
+        "csi_min_shift must be between 1 and 31, not -1",
+    ),
+    (
+        lambda path: BgzfWriter(path, index=CSI, columns=BED, csi_depth=-1),
+        "csi_depth must be between 1 and 9, not -1",
+    ),
 ]
 
 

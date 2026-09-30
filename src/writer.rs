@@ -348,28 +348,51 @@ impl Indexer {
     }
 }
 
+/// Checks a compression level, which must be between 0 and 12.
+pub fn check_level(level: i64) -> Result<CompressionLevel> {
+    u8::try_from(level)
+        .ok()
+        .and_then(|level| CompressionLevel::new(level).ok())
+        .ok_or_else(|| Error::Invalid(format!("level must be between 0 and 12, not {level}")))
+}
+
+/// Checks the CSI bin parameters and returns the index format they describe.
+pub fn csi_format(min_shift: i64, depth: Option<i64>) -> Result<IndexFormat> {
+    let min_shift = u32::try_from(min_shift)
+        .ok()
+        .filter(|shift| (1..=TABIX_MAX_SHIFT).contains(shift))
+        .ok_or_else(|| {
+            Error::Invalid(format!(
+                "csi_min_shift must be between 1 and {TABIX_MAX_SHIFT}, not {min_shift}"
+            ))
+        })?;
+    let depth = depth
+        .map(|depth| {
+            u32::try_from(depth)
+                .ok()
+                .filter(|depth| (1..=9).contains(depth))
+                .ok_or_else(|| {
+                    Error::Invalid(format!("csi_depth must be between 1 and 9, not {depth}"))
+                })
+        })
+        .transpose()?;
+    Ok(IndexFormat::Csi { min_shift, depth })
+}
+
 /// Checks writer options before anything is created.
 pub fn check_options(
-    level: u8,
-    threads: usize,
+    level: i64,
+    threads: i64,
     index: Option<&IndexOptions>,
 ) -> Result<(CompressionLevel, NonZero<usize>)> {
-    let compression = CompressionLevel::new(level)
-        .map_err(|_| Error::Invalid(format!("level must be between 0 and 12, not {level}")))?;
+    let compression = check_level(level)?;
     let threads = crate::check_threads(threads).map_err(Error::Invalid)?;
     if let Some(options) = index {
         if let Some(columns) = &options.columns {
             columns.validate().map_err(Error::Invalid)?;
         }
         if let IndexFormat::Csi { min_shift, depth } = options.format {
-            if !(1..=TABIX_MAX_SHIFT).contains(&min_shift) {
-                return Err(Error::Invalid(format!(
-                    "csi_min_shift must be between 1 and {TABIX_MAX_SHIFT}, not {min_shift}"
-                )));
-            }
-            if depth.is_some_and(|depth| !(1..=9).contains(&depth)) {
-                return Err(Error::Invalid("csi_depth must be between 1 and 9".into()));
-            }
+            csi_format(i64::from(min_shift), depth.map(i64::from))?;
         }
     }
     Ok((compression, threads))
@@ -387,7 +410,7 @@ pub struct Writer<W: Write> {
 impl<W: Write> Writer<W> {
     /// Creates a writer compressing at `level` (0-12) on `threads` threads.
     pub fn new(sink: W, level: u8, threads: usize, index: Option<IndexOptions>) -> Result<Self> {
-        let (level, threads) = check_options(level, threads, index.as_ref())?;
+        let (level, threads) = check_options(i64::from(level), threads as i64, index.as_ref())?;
         Ok(Self {
             blocks: BlockWriter::new(sink, level, threads)?,
             indexer: index.map(Indexer::new),

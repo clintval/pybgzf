@@ -99,6 +99,8 @@ def test_tell_and_seek_use_virtual_offsets(data_dir: Path) -> None:
                 assert reader.readline() == line
             with pytest.raises(io.UnsupportedOperation):
                 reader.seek(0, io.SEEK_END)
+            with pytest.raises(ValueError, match="negative"):
+                reader.seek(-1)
 
 
 def test_offsets_agree_with_the_writer(tmp_path: Path) -> None:
@@ -151,6 +153,8 @@ def test_invalid_reader_options(tmp_path: Path) -> None:
         BgzfReader(tmp_path / "x.gz", threads=0)
     with pytest.raises(ValueError, match="threads must be between 1 and 1024"):
         BgzfReader(tmp_path / "x.gz", threads=100_000)
+    with pytest.raises(ValueError, match="threads must be between 1 and 1024, not -1"):
+        BgzfReader(tmp_path / "x.gz", threads=-1)
     with pytest.raises(FileNotFoundError):
         BgzfReader(tmp_path / "missing.gz")
 

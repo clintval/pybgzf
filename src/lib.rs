@@ -17,8 +17,10 @@ use std::num::NonZero;
 pub const MAX_THREADS: usize = 1024;
 
 /// Checks that a thread count is between 1 and [`MAX_THREADS`].
-pub fn check_threads(threads: usize) -> Result<NonZero<usize>, String> {
-    NonZero::new(threads)
+pub fn check_threads(threads: i64) -> Result<NonZero<usize>, String> {
+    usize::try_from(threads)
+        .ok()
+        .and_then(NonZero::new)
         .filter(|threads| threads.get() <= MAX_THREADS)
         .ok_or_else(|| format!("threads must be between 1 and {MAX_THREADS}, not {threads}"))
 }

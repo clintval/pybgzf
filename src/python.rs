@@ -14,7 +14,9 @@ use pyo3::types::{PyBytes, PyString};
 use crate::columns::{Columns, Kind};
 use crate::reader::{AnyIndex, BgzfReader, IndexedReader as CoreIndexedReader, Query, QueryError};
 use crate::sniff;
-use crate::writer::{Error, IndexFormat, IndexOptions, Writer as CoreWriter, check_options};
+use crate::writer::{
+    Error, IndexFormat, IndexOptions, Writer as CoreWriter, check_options, csi_format,
+};
 
 const FILE_BUFFER: usize = 256 * 1024;
 
@@ -132,15 +134,15 @@ impl Writer {
     #[allow(clippy::too_many_arguments)]
     fn new(
         dest: &Bound<'_, PyAny>,
-        level: u8,
-        threads: usize,
+        level: i64,
+        threads: i64,
         index: Option<&str>,
         index_path: Option<PathBuf>,
         columns: Option<ColumnsTuple>,
         infer: bool,
         infer_bed: bool,
-        csi_min_shift: u32,
-        csi_depth: Option<u32>,
+        csi_min_shift: i64,
+        csi_depth: Option<i64>,
     ) -> PyResult<Self> {
         let columns = columns.map(columns_from_tuple).transpose()?;
         let infer = infer || infer_bed;
@@ -156,10 +158,7 @@ impl Writer {
             Some(format) => {
                 let format = match format {
                     "tbi" => IndexFormat::Tabix,
-                    "csi" => IndexFormat::Csi {
-                        min_shift: csi_min_shift,
-                        depth: csi_depth,
-                    },
+                    "csi" => csi_format(csi_min_shift, csi_depth).map_err(to_python)?,
                     other => {
                         return Err(PyValueError::new_err(format!(
                             "unknown index format: {other}"
@@ -190,6 +189,8 @@ impl Writer {
         } else {
             Sink::Python(dest.clone().unbind())
         };
+        let level = u8::try_from(level).expect("the level was checked");
+        let threads = usize::try_from(threads).expect("threads were checked");
         let inner = CoreWriter::new(sink, level, threads, options).map_err(to_python)?;
         Ok(Self { inner })
     }
@@ -331,7 +332,7 @@ impl Seek for Source {
     }
 }
 
-fn threads(threads: usize) -> PyResult<NonZero<usize>> {
+fn threads(threads: i64) -> PyResult<NonZero<usize>> {
     crate::check_threads(threads).map_err(PyValueError::new_err)
 }
 
@@ -363,7 +364,7 @@ impl Reader {
 impl Reader {
     #[new]
     #[pyo3(signature = (src, *, threads))]
-    fn new(py: Python<'_>, src: &Bound<'_, PyAny>, threads: usize) -> PyResult<Self> {
+    fn new(py: Python<'_>, src: &Bound<'_, PyAny>, threads: i64) -> PyResult<Self> {
         let threads = self::threads(threads)?;
         let source = if src.is_instance_of::<PyString>() {
             let path: PathBuf = src.extract()?;
@@ -420,7 +421,9 @@ impl Reader {
     }
 
     /// Moves to a virtual position.
-    fn seek(&mut self, py: Python<'_>, position: u64) -> PyResult<u64> {
+    fn seek(&mut self, py: Python<'_>, position: i64) -> PyResult<u64> {
+        let position = u64::try_from(position)
+            .map_err(|_| PyValueError::new_err(format!("negative seek position {position}")))?;
         let inner = self.inner()?;
         py.detach(|| inner.seek(position)).map_err(io_to_python)?;
         Ok(inner.virtual_position())
@@ -464,7 +467,7 @@ impl IndexedReader {
     #[new]
     #[pyo3(signature = (path, index_path, *, threads))]
     #[allow(clippy::needless_pass_by_value)]
-    fn new(py: Python<'_>, path: PathBuf, index_path: PathBuf, threads: usize) -> PyResult<Self> {
+    fn new(py: Python<'_>, path: PathBuf, index_path: PathBuf, threads: i64) -> PyResult<Self> {
         let threads = self::threads(threads)?;
         let inner = py.detach(|| {
             let index = AnyIndex::read(&index_path)?;
