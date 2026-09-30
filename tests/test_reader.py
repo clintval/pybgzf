@@ -3,6 +3,7 @@ import io
 import os
 import random
 import shutil
+import struct
 import threading
 import warnings
 from pathlib import Path
@@ -371,6 +372,18 @@ def test_vcf_with_the_smallest_csi_bins_can_be_queried(tmp_path: Path, csi_min_s
     with IndexedReader(path) as reader:
         assert list(reader.query("1", 0, 10_000)) == lines
         assert list(reader.query("1", 98, 99)) == ["1\t99\t.\tA\tG\t.\t.\t."]
+
+
+def test_csi_indexes_deeper_than_nine_levels_are_rejected(tmp_path: Path) -> None:
+    path = tmp_path / "deep.vcf.gz"
+    with pybgzf.writer(path) as handle:
+        handle.write("1\t1\t.\tA\tG\t.\t.\t.\n")
+    header = struct.pack("<7i", 2, 1, 2, 0, ord("#"), 0, 2) + b"1\0"
+    index = struct.pack("<4s3i", b"CSI\x01", 2, 10, len(header)) + header + struct.pack("<2i", 1, 0)
+    with BgzfWriter(f"{path}.csi") as writer:
+        writer.write(index)
+    with pytest.raises(ValueError, match="has 10 bin levels"):
+        IndexedReader(path)
 
 
 @pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="named pipes are not available")
