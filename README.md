@@ -2,7 +2,7 @@
 
 [![Build Status](https://github.com/clintval/pybgzf/actions/workflows/tests.yml/badge.svg?branch=main)](https://github.com/clintval/pybgzf/actions/workflows/tests.yml?query=branch%3Amain)
 [![Python Versions](https://img.shields.io/badge/python-3.11_|_3.12_|_3.13_|_3.14-blue)](https://github.com/clintval/pybgzf)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://github.com/clintval/pybgzf/blob/main/LICENSE)
 [![Language](https://img.shields.io/badge/language-rust-dea588.svg)](https://www.rust-lang.org/)
 
 Streaming BGZF compression with on-the-fly tabix and CSI indexing.
@@ -92,6 +92,6 @@ Writing 200 MB of BED lines at level 6, then reading them back, on an Apple M3 M
 
 ## Development and Testing
 
-See the [contributing guide](./CONTRIBUTING.md) for more information.
+See the [contributing guide](https://github.com/clintval/pybgzf/blob/main/CONTRIBUTING.md) for more information.
 
-The multithreaded, position-tracking writer is adapted from [fgumi](https://github.com/fulcrumgenomics/fgumi), and indexing follows [htslib](https://github.com/samtools/htslib); see [NOTICE](NOTICE).
+The multithreaded, position-tracking writer is adapted from [fgumi](https://github.com/fulcrumgenomics/fgumi), and indexing follows [htslib](https://github.com/samtools/htslib); see [NOTICE](https://github.com/clintval/pybgzf/blob/main/NOTICE).
