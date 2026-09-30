@@ -1,0 +1,235 @@
+[project]
+name = "pybgzf"
+version = "0.1.0"
+description = "Streaming BGZF compression with on-the-fly tabix and CSI indexing."
+authors = [{ name = "Clint Valentine", email = "valentine.clint@gmail.com" }]
+license = "MIT"
+readme = "README.md"
+keywords = ["bgzf", "bgzip", "tabix", "csi", "compression", "bioinformatics", "genomics"]
+license-files = ["LICENSE", "NOTICE"]
+requires-python = ">=3.11"
+dependencies = ["typing-extensions>=4.12"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Natural Language :: English",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Programming Language :: Rust",
+    "Topic :: Scientific/Engineering :: Bio-Informatics",
+    "Topic :: System :: Archiving :: Compression",
+    "Typing :: Typed",
+]
+
+[project.urls]
+"homepage" = "https://github.com/clintval/pybgzf"
+"repository" = "https://github.com/clintval/pybgzf"
+"Bug Tracker" = "https://github.com/clintval/pybgzf/issues"
+
+[dependency-groups]
+dev = [
+    "basedpyright ~=1.40",
+    "maturin ~=1.15",
+    "mypy ~=2.3",
+    "poethepoet ~=0.48",
+    "pytest ~=9.1",
+    "pytest-cov ~=7.1",
+    "pytest-doctestplus ~=1.7",
+    "ruff ~=0.16",
+    "ty ~=0.0.83",
+    "validate-pyproject[all] ~=0.26",
+]
+
+[build-system]
+requires      = ["maturin>=1.15,<2"]
+build-backend = "maturin"
+
+[tool.maturin]
+python-source = "python"
+module-name   = "pybgzf._pybgzf"
+features      = ["python"]
+include       = [
+    { path = "LICENSE", format = "sdist" },
+    { path = "NOTICE", format = "sdist" },
+    { path = "tests/**/*", format = "sdist" },
+]
+
+[tool.uv]
+# Ignore releases younger than a week, so a compromised publish has time to be
+# caught before it can be locked. Must stay >= the Dependabot `cooldown` in
+# .github/dependabot.yml, or Dependabot will propose versions that can't lock.
+exclude-newer = "1 week"
+cache-keys    = [
+    { file = "pyproject.toml" },
+    { file = "Cargo.toml" },
+    { file = "Cargo.lock" },
+    { file = "src/**/*.rs" },
+]
+
+[tool.poe.tasks]
+fix-format = "ruff format"
+fix-lint   = "ruff check --fix"
+fix-rust   = "cargo fmt"
+
+fix-all.ignore_fail = "return_non_zero"
+fix-all.sequence    = ["fix-format", "fix-lint", "fix-rust"]
+
+check-lock      = "uv lock --check"
+check-pyproject = "validate-pyproject pyproject.toml"
+check-format    = "ruff format --check --diff"
+check-lint      = "ruff check"
+check-tests     = "pytest --doctest-glob='*.md'"
+
+_check-mypy    = "mypy"
+_check-pyright = "basedpyright"
+_check-ty      = "ty check"
+check-typing.sequence = ["_check-mypy", "_check-pyright", "_check-ty"]
+
+_check-rust-format = "cargo fmt --check"
+_check-rust-lint   = "cargo clippy --all-targets --all-features --locked -- -D warnings"
+_check-rust-tests  = "cargo test --no-default-features --locked"
+check-rust.sequence = ["_check-rust-format", "_check-rust-lint", "_check-rust-tests"]
+
+check-all.ignore_fail = "return_non_zero"
+check-all.sequence    = [
+    "check-lock",
+    "check-pyproject",
+    "check-format",
+    "check-lint",
+    "check-tests",
+    "check-typing",
+    "check-rust",
+]
+
+fix-and-check-all.ignore_fail = "return_non_zero"
+fix-and-check-all.sequence    = ["fix-all", "check-all"]
+
+[tool.pytest.ini_options]
+minversion = "7.4"
+testpaths  = ["tests", "README.md"]
+pythonpath = ["."]
+addopts    = [
+    "--color=yes",
+    "--cov-fail-under=90",
+    "--cov-report=term-missing",
+    "--cov=pybgzf",
+    "--doctest-plus",
+    "--import-mode=importlib",
+]
+doctest_plus = "enabled"
+doctest_optionflags = [
+    "ELLIPSIS",
+    "IGNORE_EXCEPTION_DETAIL",
+    "NORMALIZE_WHITESPACE",
+]
+
+[tool.mypy]
+files                       = ["python/", "tests/", "benchmarks/"]
+strict                      = true
+warn_unreachable            = true
+enable_error_code           = [
+    "ignore-without-code",
+    "possibly-undefined",
+]
+
+[tool.pyright]
+include                            = ["python/", "tests/", "benchmarks/"]
+enableTypeIgnoreComments           = false
+reportUnnecessaryTypeIgnoreComment = "error"
+reportImportCycles                 = false
+failOnWarnings                     = true
+reportAny                          = false
+reportExplicitAny                  = false
+reportUnusedCallResult             = false
+pythonVersion                      = "3.11"
+
+[tool.ty.src]
+include = ["python/", "tests/", "benchmarks/"]
+
+[tool.ty.analysis]
+respect-type-ignore-comments = false
+
+[tool.ty.rules]
+unused-ignore-comment = "error"
+
+[tool.ruff]
+include        = ["python/**", "tests/**", "benchmarks/**"]
+line-length    = 100
+target-version = "py311"
+output-format  = "full"
+preview        = true
+
+[tool.ruff.lint]
+select    = [
+    "A",      # builtins shadowing
+    "ARG",    # Unused arguments
+    "C901",   # McCabe complexity
+    "B",      # bugbear
+    "D",      # pydocstyle (docstrings. We have the "google" convention enabled)
+    "D204",   # Blank line between class docstring and first (__init__) method
+    "E",      # pycodestyle errors
+    "LOG",    # flake8-logging
+    "F",      # pyflakes
+    "I",      # isort
+    "N",      # PEP8 naming
+    "W",      # pycodestyle warnings
+    "Q",      # flake8-quotes
+]
+ignore    = [
+    "E203",
+    "E701",
+    "D213",  # summary line should be located on the line after opening quote
+    "D100",  # missing docstring in public module
+    "D104",  # missing docstring in public package
+]
+unfixable = ["B"]
+preview = true
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["D"]
+"benchmarks/**" = ["D"]
+
+[tool.ruff.lint.mccabe]
+max-complexity = 13
+
+[tool.ruff.lint.isort]
+force-single-line = true
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+[tool.git-cliff.changelog]
+header = ""
+trim = true
+body = """
+{% for group, commits in commits | group_by(attribute="group") %}
+    ## {{ group | upper_first }}
+    {% for commit in commits %}
+        - {{ commit.message | upper_first }} ({{ commit.id | truncate(length=8, end="") }})\
+    {% endfor %}
+{% endfor %}\n
+"""
+
+[tool.git-cliff.git]
+conventional_commits = true
+commit_parsers = [
+    { message = "^.+!:*", group = "Breaking"},
+    { message = "^security*", group = "Security"},
+    { message = "^feat*", group = "Features"},
+    { message = "^fix*", group = "Bug Fixes"},
+    { message = "^docs*", group = "Documentation"},
+    { message = "^perf*", group = "Performance"},
+    { message = "^refactor*", group = "Refactor"},
+    { message = "^style*", group = "Styling"},
+    { message = "^test*", group = "Testing"},
+    { message = "^chore\\(release\\):*", skip = true},
+    { message = "^chore*", group = "Miscellaneous Tasks"},
+    { body = ".*security", group = "Security"}
+]
+filter_commits = false

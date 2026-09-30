@@ -1,0 +1,19 @@
+pybgzf
+Copyright © 2026 Clint Valentine
+
+The multithreaded, position-tracking BGZF block writer in src/block.rs is adapted
+from fgumi (https://github.com/fulcrumgenomics/fgumi), file
+crates/fgumi-bam-io/src/vendored/bgzf_multithreaded.rs, which is distributed
+under the MIT License:
+
+  Copyright (c) 2025-2026 Fulcrum Genomics LLC
+
+The index construction in src/index.rs and the line parsing in src/columns.rs
+follow the behavior of htslib (https://github.com/samtools/htslib), files hts.c
+and tbx.c, which are distributed under the MIT/Expat License:
+
+  Copyright (C) 2008-2026 Genome Research Ltd.
+  Copyright (C) 2010-2012 Broad Institute.
+
+Compression uses the bgzf crate (https://github.com/fulcrumgenomics/bgzf, MIT)
+and indexes are serialized with noodles (https://github.com/zaeleus/noodles, MIT).

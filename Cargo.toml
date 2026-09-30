@@ -1,0 +1,50 @@
+[package]
+name = "pybgzf"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+authors = ["Clint Valentine <valentine.clint@gmail.com>"]
+license = "MIT"
+description = "Streaming BGZF compression with on-the-fly tabix and CSI indexing"
+repository = "https://github.com/clintval/pybgzf"
+readme = "README.md"
+publish = false
+
+[lib]
+name = "_pybgzf"
+crate-type = ["cdylib", "rlib"]
+
+[features]
+default = ["python"]
+python = ["dep:pyo3"]
+
+[dependencies]
+bgzf = "0.5"
+bstr = "1.12"
+crossbeam-channel = "0.5"
+indexmap = "2.14"
+memchr = "2.8"
+noodles-bgzf = "0.51"
+noodles-csi = "0.61"
+noodles-tabix = "0.67"
+pyo3 = { version = "0.29", features = ["abi3-py311"], optional = true }
+
+[dev-dependencies]
+tempfile = "3"
+
+[lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+cast_possible_truncation = "allow"
+cast_possible_wrap = "allow"
+cast_sign_loss = "allow"
+module_name_repetitions = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+must_use_candidate = "allow"
+similar_names = "allow"
+decimal_bitwise_operands = "allow"
+single_match_else = "allow"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
