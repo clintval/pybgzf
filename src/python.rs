@@ -711,7 +711,7 @@ impl QueryIterator {
     }
 }
 
-#[pymodule]
+#[pymodule(gil_used = false)]
 fn _pybgzf(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<Writer>()?;
     module.add_class::<Reader>()?;

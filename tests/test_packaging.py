@@ -1,8 +1,11 @@
 import re
+import sys
+import sysconfig
 import tomllib
 from pathlib import Path
 
 import pybgzf
+import pytest
 
 ROOT = Path(__file__).parent.parent
 
@@ -19,3 +22,10 @@ def test_the_version_comes_from_cargo() -> None:
     assert "version" not in project
     assert project["dynamic"] == ["version"]
     assert pybgzf.__version__ == cargo["package"]["version"]
+
+
+@pytest.mark.skipif(
+    not sysconfig.get_config_var("Py_GIL_DISABLED"), reason="Python is not free-threaded"
+)
+def test_importing_keeps_the_gil_disabled() -> None:
+    assert not getattr(sys, "_is_gil_enabled")()  # noqa: B009
