@@ -1,6 +1,6 @@
 [project]
 name = "pybgzf"
-version = "0.1.0"
+dynamic = ["version"]
 description = "Streaming BGZF compression with on-the-fly tabix and CSI indexing."
 authors = [{ name = "Clint Valentine", email = "valentine.clint@gmail.com" }]
 license = "MIT"
