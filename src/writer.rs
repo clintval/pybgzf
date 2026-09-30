@@ -242,12 +242,6 @@ impl Indexer {
         let interval = columns
             .parse(line)
             .map_err(|e| format!("line {number}: {e}"))?;
-        if memchr(0, interval.name).is_some() {
-            return Err(format!(
-                "line {number}: the reference name {:?} contains a NUL byte",
-                String::from_utf8_lossy(interval.name)
-            ));
-        }
         let (min_shift, depth) = match self.bins {
             Some(bins) => bins,
             None => self
@@ -286,6 +280,11 @@ impl Indexer {
             return Err(format!(
                 "line {number}: records for {:?} are not contiguous; the lines of each reference must form one contiguous run",
                 String::from_utf8_lossy(name),
+            ));
+        } else if memchr(0, name).is_some() {
+            return Err(format!(
+                "line {number}: the reference name {:?} contains a NUL byte",
+                String::from_utf8_lossy(name)
             ));
         } else {
             self.names.insert_full(name.to_vec()).0
@@ -526,10 +525,11 @@ impl<W: Write> Writer<W> {
             indexer.partial = line;
             let record = classified.map_err(Error::Invalid)?;
             self.blocks.write(&rest[..=newline])?;
-            indexer.commit(record, self.blocks.position());
+            let position = self.blocks.position();
+            indexer.commit(record, position);
             rest = &rest[newline + 1..];
-            if self.blocks.position().block != block {
-                block = self.blocks.position().block;
+            if position.block != block {
+                block = position.block;
                 indexer.resolve(&mut self.blocks);
             }
         }
