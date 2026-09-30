@@ -799,11 +799,11 @@ mod tests {
         writer.write(b"not an index").unwrap();
         writer.finish().unwrap();
         assert!(AnyIndex::read(&path).is_err());
-        assert!(
-            BgzfReader::new(Cursor::new(Vec::new()), threads(1))
-                .unwrap()
-                .read_until(b'\n', &mut Vec::new())
-                .is_ok()
-        );
+    }
+
+    #[test]
+    fn an_empty_source_has_no_lines() {
+        let mut reader = BgzfReader::new(Cursor::new(Vec::new()), threads(1)).unwrap();
+        assert_eq!(reader.read_until(b'\n', &mut Vec::new()).unwrap(), 0);
     }
 }

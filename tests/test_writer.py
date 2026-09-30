@@ -489,29 +489,28 @@ def test_bed_accepts_lines_without_an_end(tmp_path: Path) -> None:
         assert Path(f"{path}.tbi").exists()
 
 
+VCF_RECORD = b"chr1\t100\t.\tA\tT\t.\t.\t.\n"
+SAM_RECORD = b"r\t0\tchr1\t5\t60\t4M\t*\t0\t0\tACGT\tIIII\n"
+
+
 @pytest.mark.parametrize(
-    "header",
+    ("columns", "header", "record"),
     [
-        "##fileformat=VCFv4.3\n##contig=<ID=chr1,length=4611686018427387904>\n",
-        "##fileformat=VCFv4.3\n##contig=<ID=chr1,length=9223372036854775807>\n",
-        "##fileformat=VCFv4.3\n##contig=<ID=chr1,length=99999999999999999999>\n",
+        (Columns.VCF, "##contig=<ID=chr1,length=4611686018427387904>", VCF_RECORD),
+        (Columns.VCF, "##contig=<ID=chr1,length=9223372036854775807>", VCF_RECORD),
+        (Columns.VCF, "##contig=<ID=chr1,length=99999999999999999999>", VCF_RECORD),
+        (Columns.SAM, "@SQ\tSN:chr1\tLN:4611686018427387904", SAM_RECORD),
     ],
 )
-def test_references_too_long_for_csi_raise(tmp_path: Path, header: str) -> None:
-    path = tmp_path / "long.vcf.gz"
-    with BgzfWriter(path, index=IndexFormat.CSI, columns=Columns.VCF) as writer:
-        writer.write(header.encode())
+def test_references_too_long_for_csi_raise(
+    tmp_path: Path, columns: Columns, header: str, record: bytes
+) -> None:
+    path = tmp_path / "long.gz"
+    with BgzfWriter(path, index=IndexFormat.CSI, columns=columns) as writer:
+        writer.write(f"{header}\n".encode())
         with pytest.raises(ValueError, match="too long for a CSI index"):
-            writer.write(b"chr1\t100\t.\tA\tT\t.\t.\t.\n")
+            writer.write(record)
     assert not Path(f"{path}.csi").exists()
-
-
-def test_sam_references_too_long_for_csi_raise(tmp_path: Path) -> None:
-    path = tmp_path / "long.sam.gz"
-    with BgzfWriter(path, index=IndexFormat.CSI, columns=Columns.SAM) as writer:
-        writer.write(b"@SQ\tSN:chr1\tLN:4611686018427387904\n")
-        with pytest.raises(ValueError, match="too long for a CSI index"):
-            writer.write(b"r\t0\tchr1\t5\t60\t4M\t*\t0\t0\tACGT\tIIII\n")
 
 
 def test_huge_cigar_lengths_saturate(tmp_path: Path) -> None:

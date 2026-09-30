@@ -347,19 +347,6 @@ def test_corrupt_input_raises_from_queries(
             list(reader.query(refname, 0, 10**9))
 
 
-@pytest.mark.parametrize("threads", [1, 4])
-def test_seeking_after_the_end_reads_again(data_dir: Path, threads: int) -> None:
-    path = bed_path(data_dir, IndexFormat.TBI)
-    with BgzfReader(path, threads=threads) as reader:
-        first = reader.readline()
-        end = len(reader.readall()) + len(first)
-        assert reader.read(10) == b""
-        assert reader.tell() == reader.tell()
-        reader.seek(0)
-        assert reader.readline() == first
-        assert len(first) + len(reader.readall()) == end
-
-
 @pytest.mark.parametrize("index", [IndexFormat.TBI, IndexFormat.CSI])
 def test_queries_reach_the_last_position_an_index_holds(tmp_path: Path, index: IndexFormat) -> None:
     path = tmp_path / "edge.bed.gz"
@@ -546,7 +533,8 @@ def test_seeking_to_the_end(data_dir: Path, threads: int) -> None:
     size = path.stat().st_size
     with BgzfReader(path, threads=threads) as reader:
         first = reader.readline()
-        reader.readall()
+        rest = reader.readall()
+        assert reader.read(10) == b""
         end = reader.tell()
         for position in (end, (size - 28) << 16, end):
             reader.seek(0)
@@ -556,6 +544,7 @@ def test_seeking_to_the_end(data_dir: Path, threads: int) -> None:
             assert reader.readline() == b""
         reader.seek(0)
         assert reader.readline() == first
+        assert reader.readall() == rest
 
 
 @pytest.mark.parametrize("threads", [1, 3])
