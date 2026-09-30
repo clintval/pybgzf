@@ -662,6 +662,14 @@ impl IndexedReader {
     }
 }
 
+impl Drop for IndexedReader {
+    fn drop(&mut self) {
+        if let Some(inner) = self.inner.take() {
+            Python::attach(|py| drop_detached(py, inner));
+        }
+    }
+}
+
 const QUERY_BATCH: usize = 256 * 1024;
 
 /// Lines overlapping a region, read in batches with the GIL released.
