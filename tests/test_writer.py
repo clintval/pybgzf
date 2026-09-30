@@ -629,3 +629,12 @@ def test_flush_and_tell_work_after_an_indexing_error(tmp_path: Path) -> None:
             writer.write(b"chr1\t50\t60\n")
         writer.flush()
         assert writer.tell() > 0
+
+
+def test_text_writes_raise_indexing_errors_at_once(tmp_path: Path) -> None:
+    path = tmp_path / "out.bed.gz"
+    with pybgzf.open_writer(path, index=IndexFormat.TBI, columns=Columns.BED) as handle:
+        handle.write("chr1\t100\t200\n")
+        with pytest.raises(ValueError, match="line 2: records are not sorted"):
+            handle.write("chr1\t50\t60\n")
+    assert not Path(f"{path}.tbi").exists()

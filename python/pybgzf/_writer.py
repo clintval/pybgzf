@@ -238,6 +238,7 @@ def open_writer(
     Lines end in a line feed on every platform unless `newline` is given, which then works as in
     `io.TextIOWrapper`.
     Every other argument is passed to `BgzfWriter`.
+    With an index, text is passed on at every write, so a line that cannot be indexed raises there.
     """
     writer = BgzfWriter(
         dest,
@@ -254,4 +255,5 @@ def open_writer(
         encoding="utf-8" if encoding is None else encoding,
         errors=errors,
         newline="\n" if newline is None else newline,
+        write_through=index is not None,
     )
