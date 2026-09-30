@@ -239,11 +239,6 @@ impl<R: Read + Seek + Send + 'static> BgzfReader<R> {
         false
     }
 
-    /// Returns true if blocks are read ahead on another thread, which may be waiting for data.
-    pub fn reads_ahead(&self) -> bool {
-        matches!(self.inner, Inner::Parallel(_))
-    }
-
     /// Checks at the end of the stream that no bytes follow the last complete block, then, when
     /// reading on threads, stops them, which reports any error they met, such as a corrupt block.
     fn exhaust(&mut self) -> io::Result<()> {
