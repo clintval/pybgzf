@@ -8,12 +8,14 @@ under the MIT License:
 
   Copyright (c) 2025-2026 Fulcrum Genomics LLC
 
-The index construction in src/index.rs and the line parsing in src/columns.rs
-follow the behavior of htslib (https://github.com/samtools/htslib), files hts.c
-and tbx.c, which are distributed under the MIT/Expat License:
+The index construction in src/index.rs, the bin ordering in src/khash.rs, and
+the line parsing in src/columns.rs follow the behavior of htslib
+(https://github.com/samtools/htslib), files hts.c, tbx.c, and htslib/khash.h,
+which are distributed under the MIT/Expat License:
 
   Copyright (C) 2008-2026 Genome Research Ltd.
   Copyright (C) 2010-2012 Broad Institute.
 
-Compression uses the bgzf crate (https://github.com/fulcrumgenomics/bgzf, MIT)
-and indexes are serialized with noodles (https://github.com/zaeleus/noodles, MIT).
+Compression uses the bgzf crate (https://github.com/fulcrumgenomics/bgzf, MIT).
+Decompression and reading and writing indexes use noodles
+(https://github.com/zaeleus/noodles, MIT).
