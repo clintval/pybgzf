@@ -1,0 +1,28 @@
+[package]
+name = "pybgzf-fuzz"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+pybgzf = { path = "..", default-features = false }
+
+[[bin]]
+name = "parse_columns"
+path = "fuzz_targets/parse_columns.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "index_lines"
+path = "fuzz_targets/index_lines.rs"
+test = false
+doc = false
+bench = false
+
+[workspace]
