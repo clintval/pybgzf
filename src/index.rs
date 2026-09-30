@@ -1,11 +1,11 @@
 //! A binning index built record by record, following htslib's `hts_idx_push` and
 //! `hts_idx_finish`, then written with noodles as a tabix or CSI index.
 
-use std::collections::HashMap;
+use ahash::AHashMap;
 use std::io::{self, Write};
 
 use bstr::BString;
-use indexmap::{IndexMap, IndexSet};
+use indexmap::IndexMap;
 use noodles_bgzf::VirtualPosition;
 use noodles_csi::binning_index::index::header::format::CoordinateSystem;
 use noodles_csi::binning_index::index::header::{Format, Header};
@@ -14,6 +14,7 @@ use noodles_csi::binning_index::index::reference_sequence::bin::Chunk;
 use noodles_csi::binning_index::index::reference_sequence::index::{BinnedIndex, LinearIndex};
 use noodles_csi::binning_index::index::{Index, ReferenceSequence};
 
+use crate::Names;
 use crate::columns::Kind;
 use crate::khash::KhashOrder;
 
@@ -64,7 +65,7 @@ pub fn reg2bin(beg: i64, end: i64, min_shift: u32, depth: u32) -> u32 {
 
 #[derive(Default)]
 struct Reference {
-    bins: HashMap<u32, Vec<(u64, u64)>>,
+    bins: AHashMap<u32, Vec<(u64, u64)>>,
     order: KhashOrder,
     linear: Vec<u64>,
     metadata: Option<(u64, u64, u64)>,
@@ -247,7 +248,7 @@ pub struct Layout {
 }
 
 impl Layout {
-    fn header(&self, names: &IndexSet<Vec<u8>>) -> Header {
+    fn header(&self, names: &Names) -> Header {
         let names = names
             .iter()
             .map(|name| BString::from(name.clone()))
@@ -318,7 +319,7 @@ pub fn tabix(
     builder: IndexBuilder,
     final_offset: u64,
     layout: &Layout,
-    names: &IndexSet<Vec<u8>>,
+    names: &Names,
 ) -> noodles_tabix::Index {
     let (min_shift, depth, references) = builder.finish(final_offset);
     let references = references
@@ -350,7 +351,7 @@ pub fn csi(
     builder: IndexBuilder,
     final_offset: u64,
     layout: &Layout,
-    names: &IndexSet<Vec<u8>>,
+    names: &Names,
 ) -> noodles_csi::Index {
     let (min_shift, depth, references) = builder.finish(final_offset);
     let bin_count = bin_first(depth + 1);

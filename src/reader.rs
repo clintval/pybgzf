@@ -5,7 +5,7 @@ use std::io::{self, BufRead, BufReader, Read, Seek};
 use std::num::NonZero;
 use std::path::Path;
 
-use indexmap::IndexSet;
+use crate::Names;
 use noodles_bgzf::VirtualPosition;
 use noodles_bgzf::io::{MultithreadedReader, Reader as SerialReader, Seek as _};
 use noodles_core::{Position, region::Interval};
@@ -206,7 +206,7 @@ pub struct IndexedReader<R: Read + Seek + Send + 'static> {
     reader: BgzfReader<R>,
     index: AnyIndex,
     columns: Columns,
-    names: IndexSet<Vec<u8>>,
+    names: Names,
     line: Vec<u8>,
 }
 

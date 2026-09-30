@@ -6,8 +6,8 @@ use std::io::{self, BufWriter, Write};
 use std::num::NonZero;
 use std::path::PathBuf;
 
+use crate::Names;
 use bgzf::CompressionLevel;
-use indexmap::IndexSet;
 use memchr::{memchr, memmem};
 
 use crate::block::{BLOCK_SIZE, BlockWriter, LogicalPosition};
@@ -63,7 +63,7 @@ struct Indexer {
     sniffer: Sniffer,
     partial: Vec<u8>,
     line_number: u64,
-    names: IndexSet<Vec<u8>>,
+    names: Names,
     last: Option<(usize, i64, u64)>,
     bins: Option<(u32, u32)>,
     longest_vcf_contig: i64,
@@ -131,7 +131,7 @@ impl Indexer {
             },
             partial: Vec::new(),
             line_number: 0,
-            names: IndexSet::new(),
+            names: Names::default(),
             last: None,
             bins: None,
             longest_vcf_contig: 0,

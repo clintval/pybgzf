@@ -19,6 +19,7 @@ default = ["python"]
 python = ["dep:pyo3"]
 
 [dependencies]
+ahash = "0.8"
 bgzf = "0.5"
 bstr = "1.12"
 crossbeam-channel = "0.5"
