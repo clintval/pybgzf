@@ -543,3 +543,22 @@ def test_query_bounds_beyond_64_bits(data_dir: Path, lines: list[str]) -> None:
 def test_open_reader_checks_the_encoding_first(data_dir: Path) -> None:
     with pytest.raises(LookupError):
         pybgzf.open_reader(bed_path(data_dir, IndexFormat.TBI), threads=2, encoding="no-such-codec")
+
+
+@pytest.mark.parametrize("threads", [1, 3])
+def test_errors_name_the_file(tmp_path: Path, data_dir: Path, threads: int) -> None:
+    missing = tmp_path / "missing.gz"
+    with pytest.raises(FileNotFoundError) as error:
+        BgzfReader(missing, threads=threads)
+    assert error.value.filename == str(missing)
+    path = tmp_path / "truncated.gz"
+    path.write_bytes(corrupted(data_dir, "truncated"))
+    with pytest.raises(OSError, match="truncated.gz"), BgzfReader(path, threads=threads) as reader:
+        reader.readall()
+    shutil.copyfile(f"{bed_path(data_dir, IndexFormat.TBI)}.tbi", f"{path}.tbi")
+    with (
+        pytest.raises(OSError, match="truncated.gz"),
+        IndexedReader(path, threads=threads) as indexed,
+    ):
+        for refname in REFERENCES:
+            list(indexed.query(refname, 0, 10**9))

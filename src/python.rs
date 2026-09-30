@@ -4,11 +4,11 @@ use std::collections::VecDeque;
 use std::fs::File;
 use std::io::{self, BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::num::NonZero;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::thread;
 
 use pyo3::buffer::PyBuffer;
-use pyo3::exceptions::PyValueError;
+use pyo3::exceptions::{PyOSError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyString, PyType};
 
@@ -417,6 +417,28 @@ fn io_to_python(error: io::Error) -> PyErr {
     to_python(Error::Io(error))
 }
 
+/// Converts an error reading `path`, naming the file as Python's own errors do.
+fn path_error(error: io::Error, path: Option<&Path>) -> PyErr {
+    let Some(path) = path else {
+        return io_to_python(error);
+    };
+    if error
+        .get_ref()
+        .is_some_and(<dyn std::error::Error + Send + Sync>::is::<PyErr>)
+    {
+        return io_to_python(error);
+    }
+    let name = path.display().to_string();
+    match error.raw_os_error() {
+        Some(code) => {
+            let message = error.to_string();
+            let message = message.split(" (os error").next().unwrap_or(&message);
+            PyOSError::new_err((code, message.to_string(), name))
+        }
+        None => io_to_python(io::Error::new(error.kind(), format!("{name}: {error}"))),
+    }
+}
+
 fn closed_error() -> PyErr {
     PyValueError::new_err("I/O operation on closed file.")
 }
@@ -439,12 +461,14 @@ fn release(py: Python<'_>, reader: BgzfReader<Source>, may_block: bool) {
 #[pyclass(module = "pybgzf._pybgzf")]
 struct Reader {
     inner: Option<BgzfReader<Source>>,
+    path: Option<PathBuf>,
     may_block: bool,
 }
 
 impl Reader {
-    fn inner(&mut self) -> PyResult<&mut BgzfReader<Source>> {
-        self.inner.as_mut().ok_or_else(closed_error)
+    fn inner(&mut self) -> PyResult<(&mut BgzfReader<Source>, Option<&Path>)> {
+        let inner = self.inner.as_mut().ok_or_else(closed_error)?;
+        Ok((inner, self.path.as_deref()))
     }
 }
 
@@ -454,66 +478,70 @@ impl Reader {
     #[pyo3(signature = (src, *, threads))]
     fn new(py: Python<'_>, src: &Bound<'_, PyAny>, threads: i64) -> PyResult<Self> {
         let threads = self::threads(threads)?;
-        let (source, may_block) = if src.is_instance_of::<PyString>() {
+        let (source, path, may_block) = if src.is_instance_of::<PyString>() {
             let path: PathBuf = src.extract()?;
-            let file = File::open(path).map_err(io_to_python)?;
-            let regular = file.metadata().map_err(io_to_python)?.is_file();
+            let file = File::open(&path).map_err(|e| path_error(e, Some(&path)))?;
+            let regular = file
+                .metadata()
+                .map_err(|e| path_error(e, Some(&path)))?
+                .is_file();
             let file = BufReader::with_capacity(FILE_BUFFER, file);
-            (Source::File(file), !regular)
+            (Source::File(file), Some(path), !regular)
         } else {
             let seekable = src.hasattr("seekable")? && src.call_method0("seekable")?.is_truthy()?;
             let object = src.clone().unbind();
-            (Source::Python { object, seekable }, true)
+            (Source::Python { object, seekable }, None, true)
         };
+        let inner = py
+            .detach(|| BgzfReader::new(source, threads))
+            .map_err(|e| path_error(e, path.as_deref()))?;
         Ok(Self {
-            inner: Some(
-                py.detach(|| BgzfReader::new(source, threads))
-                    .map_err(io_to_python)?,
-            ),
+            inner: Some(inner),
+            path,
             may_block,
         })
     }
 
     /// Reads up to `size` bytes, fewer only at the end of the stream.
     fn read<'py>(&mut self, py: Python<'py>, size: usize) -> PyResult<Bound<'py, PyBytes>> {
-        let inner = self.inner()?;
+        let (inner, path) = self.inner()?;
         let mut buf = vec![0_u8; size];
         let n = py
             .detach(|| inner.read_full(&mut buf))
-            .map_err(io_to_python)?;
+            .map_err(|e| path_error(e, path))?;
         Ok(PyBytes::new(py, &buf[..n]))
     }
 
     /// Reads everything that is left.
     fn readall<'py>(&mut self, py: Python<'py>) -> PyResult<Bound<'py, PyBytes>> {
-        let inner = self.inner()?;
+        let (inner, path) = self.inner()?;
         let mut buf = Vec::new();
         py.detach(|| inner.read_to_end(&mut buf))
-            .map_err(io_to_python)?;
+            .map_err(|e| path_error(e, path))?;
         Ok(PyBytes::new(py, &buf))
     }
 
     /// Reads through the next newline.
     fn readline<'py>(&mut self, py: Python<'py>) -> PyResult<Bound<'py, PyBytes>> {
-        let inner = self.inner()?;
+        let (inner, path) = self.inner()?;
         let mut line = Vec::new();
         py.detach(|| inner.read_line(&mut line))
-            .map_err(io_to_python)?;
+            .map_err(|e| path_error(e, path))?;
         Ok(PyBytes::new(py, &line))
     }
 
     /// Returns the virtual position of the next byte.
     fn tell(&mut self) -> PyResult<u64> {
-        Ok(self.inner()?.virtual_position())
+        Ok(self.inner()?.0.virtual_position())
     }
 
     /// Moves to a virtual position.
     fn seek(&mut self, py: Python<'_>, position: u64) -> PyResult<u64> {
-        let inner = self.inner()?;
+        let (inner, path) = self.inner()?;
         py.detach(|| inner.seek(position))
             .map_err(|error| match error.kind() {
                 io::ErrorKind::InvalidInput => PyValueError::new_err(error.to_string()),
-                _ => io_to_python(error),
+                _ => path_error(error, path),
             })?;
         Ok(inner.virtual_position())
     }
@@ -543,6 +571,7 @@ impl Drop for Reader {
 #[pyclass(module = "pybgzf._pybgzf")]
 struct IndexedReader {
     inner: Option<CoreIndexedReader<BufReader<File>>>,
+    path: PathBuf,
 }
 
 impl IndexedReader {
@@ -558,17 +587,26 @@ impl IndexedReader {
     #[allow(clippy::needless_pass_by_value)]
     fn new(py: Python<'_>, path: PathBuf, index_path: PathBuf, threads: i64) -> PyResult<Self> {
         let threads = self::threads(threads)?;
-        let inner = py.detach(|| {
-            let index = AnyIndex::read(&index_path)?;
-            CoreIndexedReader::new(BgzfReader::from_path(&path, threads)?, index)
-        });
-        let inner = inner.map_err(|error| match error.kind() {
-            io::ErrorKind::InvalidData => {
-                PyValueError::new_err(format!("{}: {error}", index_path.display()))
-            }
-            _ => io_to_python(error),
-        })?;
-        Ok(Self { inner: Some(inner) })
+        let index =
+            py.detach(|| AnyIndex::read(&index_path))
+                .map_err(|error| match error.kind() {
+                    io::ErrorKind::InvalidData => {
+                        PyValueError::new_err(format!("{}: {error}", index_path.display()))
+                    }
+                    _ => path_error(error, Some(&index_path)),
+                })?;
+        let inner = py
+            .detach(|| CoreIndexedReader::new(BgzfReader::from_path(&path, threads)?, index))
+            .map_err(|error| match error.kind() {
+                io::ErrorKind::InvalidData => {
+                    PyValueError::new_err(format!("{}: {error}", index_path.display()))
+                }
+                _ => path_error(error, Some(&path)),
+            })?;
+        Ok(Self {
+            inner: Some(inner),
+            path,
+        })
     }
 
     /// Starts a query for lines overlapping the 0-based, half-open `[start, end)` on `refname`.
@@ -656,7 +694,7 @@ impl QueryIterator {
             let more = py
                 .detach(|| inner.next_lines(query, &mut batch, QUERY_BATCH))
                 .map_err(|error| match error {
-                    QueryError::Io(error) => io_to_python(error),
+                    QueryError::Io(error) => path_error(error, Some(&reader.path)),
                     QueryError::Invalid(message) => PyValueError::new_err(message),
                 })?;
             self.done = !more;
