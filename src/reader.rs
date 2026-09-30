@@ -5,8 +5,7 @@ use std::io::{self, BufRead, BufReader, Read, Seek, SeekFrom};
 use std::num::NonZero;
 use std::panic::{self, AssertUnwindSafe};
 use std::path::Path;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use indexmap::IndexSet;
 use noodles_bgzf::VirtualPosition;
@@ -47,23 +46,34 @@ pub fn ends_with_eof_marker(path: &Path) -> io::Result<bool> {
 /// without an end-of-file marker.
 const SERIAL_READ_LIMIT: usize = u16::MAX as usize;
 
-/// A source that counts the compressed bytes read from it, so that bytes after the last complete
-/// block, such as a truncated block header, are noticed, and keeps the last bytes read, so that a
-/// missing end-of-file marker is noticed.
+/// Where a source is and its last bytes, shared with the thread reading it, so that bytes after
+/// the last complete block, such as a truncated block header, and a missing end-of-file marker
+/// are noticed.
+#[derive(Default)]
+struct Progress {
+    offset: u64,
+    tail: Vec<u8>,
+}
+
+fn lock(progress: &Mutex<Progress>) -> MutexGuard<'_, Progress> {
+    progress.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
 struct Tracked<R> {
     inner: R,
-    offset: Arc<AtomicU64>,
-    tail: Arc<Mutex<Vec<u8>>>,
+    progress: Arc<Mutex<Progress>>,
 }
 
 impl<R: Read> Read for Tracked<R> {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         let n = self.inner.read(buf)?;
-        self.offset.fetch_add(n as u64, Ordering::Relaxed);
-        let mut tail = self.tail.lock().unwrap_or_else(PoisonError::into_inner);
-        tail.extend_from_slice(&buf[n.saturating_sub(EOF_MARKER.len())..n]);
-        let excess = tail.len().saturating_sub(EOF_MARKER.len());
-        drop(tail.drain(..excess));
+        let mut progress = lock(&self.progress);
+        progress.offset += n as u64;
+        progress
+            .tail
+            .extend_from_slice(&buf[n.saturating_sub(EOF_MARKER.len())..n]);
+        let excess = progress.tail.len().saturating_sub(EOF_MARKER.len());
+        progress.tail.drain(..excess);
         Ok(n)
     }
 }
@@ -71,11 +81,10 @@ impl<R: Read> Read for Tracked<R> {
 impl<R: Seek> Seek for Tracked<R> {
     fn seek(&mut self, position: SeekFrom) -> io::Result<u64> {
         let offset = self.inner.seek(position)?;
-        self.offset.store(offset, Ordering::Relaxed);
-        self.tail
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .clear();
+        *lock(&self.progress) = Progress {
+            offset,
+            tail: Vec::new(),
+        };
         Ok(offset)
     }
 }
@@ -91,8 +100,7 @@ enum Inner<R: Read + Send + 'static> {
 pub struct BgzfReader<R: Read + Seek + Send + 'static> {
     inner: Inner<R>,
     threads: NonZero<usize>,
-    offset: Arc<AtomicU64>,
-    tail: Arc<Mutex<Vec<u8>>>,
+    progress: Arc<Mutex<Progress>>,
     missing_eof_marker: Option<bool>,
 }
 
@@ -128,18 +136,15 @@ impl BgzfReader<BufReader<File>> {
 impl<R: Read + Seek + Send + 'static> BgzfReader<R> {
     /// Reads BGZF from `source`, decompressing on `threads` worker threads when more than one.
     pub fn new(source: R, threads: NonZero<usize>) -> io::Result<Self> {
-        let offset = Arc::new(AtomicU64::new(0));
-        let tail = Arc::new(Mutex::new(Vec::with_capacity(2 * EOF_MARKER.len())));
+        let progress = Arc::default();
         let source = Tracked {
             inner: source,
-            offset: Arc::clone(&offset),
-            tail: Arc::clone(&tail),
+            progress: Arc::clone(&progress),
         };
         let mut reader = Self {
             inner: Inner::Failed { position: 0 },
             threads,
-            offset,
-            tail,
+            progress,
             missing_eof_marker: None,
         };
         reader.start(source)?;
@@ -243,7 +248,11 @@ impl<R: Read + Seek + Send + 'static> BgzfReader<R> {
     /// reading on threads, stops them, which reports any error they met, such as a corrupt block.
     fn exhaust(&mut self) -> io::Result<()> {
         let consumed = self.compressed_position();
-        let read = self.offset.load(Ordering::Relaxed);
+        let (read, marked) = {
+            let progress = lock(&self.progress);
+            let marked = progress.tail.is_empty() || EOF_MARKER.ends_with(&progress.tail);
+            (progress.offset, marked)
+        };
         if read > consumed {
             let position = self.virtual_position();
             let parallel = matches!(self.inner, Inner::Parallel(_));
@@ -264,11 +273,8 @@ impl<R: Read + Seek + Send + 'static> BgzfReader<R> {
             let source = self.stop()?;
             self.inner = Inner::Exhausted { source, position };
         }
-        if self.missing_eof_marker.is_none() {
-            let tail = self.tail.lock().unwrap_or_else(PoisonError::into_inner);
-            if !tail.is_empty() && !EOF_MARKER.ends_with(&tail) {
-                self.missing_eof_marker = Some(true);
-            }
+        if self.missing_eof_marker.is_none() && !marked {
+            self.missing_eof_marker = Some(true);
         }
         Ok(())
     }
