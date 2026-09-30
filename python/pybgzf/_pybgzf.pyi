@@ -1,4 +1,5 @@
 from collections.abc import Iterator
+from typing import ClassVar
 from typing import final
 
 from typing_extensions import Buffer
@@ -11,6 +12,17 @@ from pybgzf._writer import WritableBinary
 BLOCK_SIZE: int
 
 @final
+class IndexKind:
+    TBI: ClassVar[IndexKind]
+    CSI: ClassVar[IndexKind]
+
+@final
+class LineKind:
+    GENERIC: ClassVar[LineKind]
+    SAM: ClassVar[LineKind]
+    VCF: ClassVar[LineKind]
+
+@final
 class Writer:
     def __new__(
         cls,
@@ -18,7 +30,7 @@ class Writer:
         *,
         level: int,
         threads: int,
-        index: str | None,
+        index: IndexKind | None,
         index_path: str | None,
         columns: ColumnsTuple | None,
         infer: bool,

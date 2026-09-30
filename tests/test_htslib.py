@@ -42,7 +42,7 @@ def write(
     ) as writer:
         for start in range(0, len(data), chunk):
             writer.write(data[start : start + chunk])
-    return Path(f"{path}.{index.value}")
+    return Path(f"{path}.{index.name.lower()}")
 
 
 def htslib_index(path: Path, index: IndexFormat, *args: str) -> Path:
@@ -51,7 +51,7 @@ def htslib_index(path: Path, index: IndexFormat, *args: str) -> Path:
     copy.parent.mkdir(exist_ok=True)
     shutil.copyfile(path, copy)
     tabix("-f", *(["-C"] if index is CSI else []), *args, copy)
-    return Path(f"{copy}.{index.value}")
+    return Path(f"{copy}.{index.name.lower()}")
 
 
 def assert_identical(ours: Path, theirs: Path) -> None:

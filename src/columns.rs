@@ -18,15 +18,6 @@ impl Kind {
             Kind::Vcf => "vcf",
         }
     }
-
-    pub fn from_name(name: &str) -> Option<Self> {
-        match name {
-            "generic" => Some(Kind::Generic),
-            "sam" => Some(Kind::Sam),
-            "vcf" => Some(Kind::Vcf),
-            _ => None,
-        }
-    }
 }
 
 /// Which columns hold each line's reference, start, and end, like `tabix -s -b -e -0 -c -S`.

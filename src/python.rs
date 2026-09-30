@@ -10,7 +10,7 @@ use std::thread;
 use pyo3::buffer::PyBuffer;
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
-use pyo3::types::{PyBytes, PyString};
+use pyo3::types::{PyBytes, PyString, PyType};
 
 use crate::columns::{Columns, Kind};
 use crate::reader::{AnyIndex, BgzfReader, IndexedReader as CoreIndexedReader, Query, QueryError};
@@ -21,7 +21,83 @@ use crate::writer::{
 
 const FILE_BUFFER: usize = 256 * 1024;
 
-type ColumnsTuple = (i64, i64, Option<i64>, bool, String, i64, String);
+type ColumnsTuple = (i64, i64, Option<i64>, bool, String, i64, LineKind);
+
+/// The value of each `pybgzf.LineFormat` member.
+#[pyclass(module = "pybgzf._pybgzf", eq, frozen, hash, from_py_object)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+enum LineKind {
+    #[pyo3(name = "GENERIC")]
+    Generic,
+    #[pyo3(name = "SAM")]
+    Sam,
+    #[pyo3(name = "VCF")]
+    Vcf,
+}
+
+#[pymethods]
+impl LineKind {
+    fn __reduce__<'py>(slf: &Bound<'py, Self>) -> PyResult<Reduced<'py>> {
+        let name = match *slf.get() {
+            LineKind::Generic => "GENERIC",
+            LineKind::Sam => "SAM",
+            LineKind::Vcf => "VCF",
+        };
+        reduce_to_attribute(slf.as_any(), name)
+    }
+}
+
+impl From<LineKind> for Kind {
+    fn from(kind: LineKind) -> Self {
+        match kind {
+            LineKind::Generic => Kind::Generic,
+            LineKind::Sam => Kind::Sam,
+            LineKind::Vcf => Kind::Vcf,
+        }
+    }
+}
+
+impl From<Kind> for LineKind {
+    fn from(kind: Kind) -> Self {
+        match kind {
+            Kind::Generic => LineKind::Generic,
+            Kind::Sam => LineKind::Sam,
+            Kind::Vcf => LineKind::Vcf,
+        }
+    }
+}
+
+type Reduced<'py> = (Bound<'py, PyAny>, (Bound<'py, PyType>, &'static str));
+
+/// Pickles an enum member as its class and name, which unpickling looks up with `getattr`.
+fn reduce_to_attribute<'py>(
+    member: &Bound<'py, PyAny>,
+    name: &'static str,
+) -> PyResult<Reduced<'py>> {
+    let getattr = PyModule::import(member.py(), "builtins")?.getattr("getattr")?;
+    Ok((getattr, (member.get_type(), name)))
+}
+
+/// The value of each `pybgzf.IndexFormat` member.
+#[pyclass(module = "pybgzf._pybgzf", eq, frozen, hash, from_py_object)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+enum IndexKind {
+    #[pyo3(name = "TBI")]
+    Tabix,
+    #[pyo3(name = "CSI")]
+    Csi,
+}
+
+#[pymethods]
+impl IndexKind {
+    fn __reduce__<'py>(slf: &Bound<'py, Self>) -> PyResult<Reduced<'py>> {
+        let name = match *slf.get() {
+            IndexKind::Tabix => "TBI",
+            IndexKind::Csi => "CSI",
+        };
+        reduce_to_attribute(slf.as_any(), name)
+    }
+}
 
 enum Sink {
     File(BufWriter<File>),
@@ -95,8 +171,7 @@ fn columns_from_tuple(columns: ColumnsTuple) -> PyResult<Columns> {
             ));
         }
     };
-    let kind = Kind::from_name(&kind)
-        .ok_or_else(|| PyValueError::new_err(format!("unknown line format: {kind}")))?;
+    let kind = Kind::from(kind);
     let columns = Columns {
         refname,
         start,
@@ -118,7 +193,7 @@ fn columns_to_tuple(columns: &Columns) -> ColumnsTuple {
         columns.zero_based,
         char::from(columns.meta_char).to_string(),
         columns.skip_lines as i64,
-        columns.kind.name().to_string(),
+        LineKind::from(columns.kind),
     )
 }
 
@@ -137,7 +212,7 @@ impl Writer {
         dest: &Bound<'_, PyAny>,
         level: i64,
         threads: i64,
-        index: Option<&str>,
+        index: Option<IndexKind>,
         index_path: Option<PathBuf>,
         columns: Option<ColumnsTuple>,
         infer: bool,
@@ -156,15 +231,10 @@ impl Writer {
                 }
                 None
             }
-            Some(format) => {
-                let format = match format {
-                    "tbi" => IndexFormat::Tabix,
-                    "csi" => csi_format(csi_min_shift, csi_depth).map_err(to_python)?,
-                    other => {
-                        return Err(PyValueError::new_err(format!(
-                            "unknown index format: {other}"
-                        )));
-                    }
+            Some(kind) => {
+                let format = match kind {
+                    IndexKind::Tabix => IndexFormat::Tabix,
+                    IndexKind::Csi => csi_format(csi_min_shift, csi_depth).map_err(to_python)?,
                 };
                 if columns.is_none() && !infer {
                     return Err(PyValueError::new_err(
@@ -590,6 +660,8 @@ fn _pybgzf(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<IndexedReader>()?;
     module.add_class::<QueryIterator>()?;
     module.add_class::<Sniffer>()?;
+    module.add_class::<IndexKind>()?;
+    module.add_class::<LineKind>()?;
     module.add_function(wrap_pyfunction!(validate_columns, module)?)?;
     module.add("BLOCK_SIZE", crate::block::BLOCK_SIZE)?;
     Ok(())

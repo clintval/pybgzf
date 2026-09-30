@@ -19,10 +19,10 @@ from pybgzf._columns import columns_to_tuple
 class IndexFormat(Enum):
     """The kind of index to build while writing."""
 
-    TBI = "tbi"
+    TBI = _pybgzf.IndexKind.TBI
     """A tabix index, for references up to 2^29 bases."""
 
-    CSI = "csi"
+    CSI = _pybgzf.IndexKind.CSI
     """A coordinate-sorted index, for references of any length."""
 
 
@@ -34,7 +34,7 @@ class WritableBinary(Protocol):
         ...
 
 
-_INDEX_SUFFIXES = (".tbi", ".csi")
+_INDEX_SUFFIXES = {IndexFormat.TBI: ".tbi", IndexFormat.CSI: ".csi"}
 
 
 def _is_regular_file(path: str) -> bool:
@@ -116,7 +116,7 @@ class BgzfWriter(io.RawIOBase):
                     f"cannot place an index next to {described}, which is not a regular file; "
                     + "pass index_path"
                 )
-            index_path = f"{path}.{index.value}"
+            index_path = f"{path}{_INDEX_SUFFIXES[index]}"
         index_file = None if index_path is None else os.fspath(index_path)
 
         infer = isinstance(columns, Infer)
@@ -124,7 +124,7 @@ class BgzfWriter(io.RawIOBase):
         explicit: Columns | None = columns if isinstance(columns, Columns) else None
         if infer and index_file is not None:
             index_name = index_file
-            for suffix in _INDEX_SUFFIXES:
+            for suffix in _INDEX_SUFFIXES.values():
                 index_name = index_name.removesuffix(suffix)
             names = [path, index_name] if path is not None and regular else [index_name]
             explicit = _suffix_columns(*names)

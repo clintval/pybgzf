@@ -30,7 +30,7 @@ def lines() -> list[str]:
 def data_dir(tmp_path_factory: pytest.TempPathFactory, lines: list[str]) -> Path:
     directory = tmp_path_factory.mktemp("data")
     for index in (IndexFormat.TBI, IndexFormat.CSI):
-        path = directory / index.value / "features.bed.gz"
+        path = directory / index.name.lower() / "features.bed.gz"
         path.parent.mkdir()
         with pybgzf.open_writer(path, threads=3, index=index, columns=Columns.BED) as handle:
             handle.write("#chrom\tstart\tend\tname\tscore\n")
@@ -39,7 +39,7 @@ def data_dir(tmp_path_factory: pytest.TempPathFactory, lines: list[str]) -> Path
 
 
 def bed_path(data_dir: Path, index: IndexFormat) -> Path:
-    return data_dir / index.value / "features.bed.gz"
+    return data_dir / index.name.lower() / "features.bed.gz"
 
 
 def test_round_trips_with_every_thread_count(data_dir: Path, lines: list[str]) -> None:
