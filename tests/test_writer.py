@@ -14,6 +14,8 @@ from pybgzf import BgzfWriter
 from pybgzf import Columns
 from pybgzf import IndexFormat
 from pybgzf import Infer
+from typing_extensions import Buffer
+from typing_extensions import override
 
 from tests.helpers import bed_text
 from tests.indexes import ParsedIndex
@@ -555,3 +557,37 @@ def test_leaving_a_with_block_early_finishes_the_file(tmp_path: Path) -> None:
 def test_open_writer_is_the_only_text_writer() -> None:
     assert "open" not in pybgzf.__all__
     assert not hasattr(pybgzf, "open")
+
+
+class _FailsOnce(io.RawIOBase):
+    def __init__(self, failing_call: int) -> None:
+        super().__init__()
+        self.calls: int = 0
+        self.failing_call: int = failing_call
+        self.received: bytearray = bytearray()
+
+    @override
+    def writable(self) -> bool:
+        return True
+
+    @override
+    def write(self, data: Buffer, /) -> int:
+        self.calls += 1
+        if self.calls == self.failing_call:
+            raise OSError(28, "No space left on device")
+        self.received.extend(bytes(data))
+        return len(memoryview(data))
+
+
+@pytest.mark.parametrize("threads", [1, 4])
+def test_tell_after_a_sink_failure_raises(threads: int) -> None:
+    sink = _FailsOnce(failing_call=2)
+    writer = BgzfWriter(sink, threads=threads)
+    with pytest.raises(OSError, match="No space left"):
+        writer.write(bytes(range(256)) * 4096 * 4)
+    received = bytes(sink.received)
+    with pytest.raises(OSError, match="failed earlier"):
+        writer.tell()
+    assert bytes(sink.received) == received
+    with pytest.raises(OSError, match="failed earlier"):
+        writer.close()

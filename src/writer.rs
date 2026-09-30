@@ -517,11 +517,7 @@ impl<W: Write> Writer<W> {
 
     /// Returns the virtual position of the next byte to be written.
     pub fn tell(&mut self) -> Result<u64> {
-        if self.finished {
-            return Err(Error::Io(io::Error::other(
-                "I/O operation on a closed writer",
-            )));
-        }
+        self.check()?;
         let result = self.blocks.tell().map_err(Error::Io);
         self.guard(result)
     }
