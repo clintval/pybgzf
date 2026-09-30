@@ -117,7 +117,7 @@ fn csi_bins(mut min_shift: u32, longest_reference: i64) -> std::result::Result<(
             (1_i64 << MAX_SHIFT) - 256
         ));
     }
-    let mut depth = (TABIX_MAX_SHIFT + 2).saturating_sub(min_shift) / 3;
+    let mut depth = default_depth(min_shift);
     if needed <= max_position(min_shift, MAX_DEPTH) {
         while needed > max_position(min_shift, depth) {
             depth += 1;
@@ -129,6 +129,11 @@ fn csi_bins(mut min_shift: u32, longest_reference: i64) -> std::result::Result<(
         }
     }
     Ok((min_shift, depth))
+}
+
+/// The CSI depth `tabix -C` starts from, which reaches at least 2^31 bases.
+fn default_depth(min_shift: u32) -> u32 {
+    (TABIX_MAX_SHIFT + 2).saturating_sub(min_shift) / 3
 }
 
 fn trim_line(line: &[u8]) -> &[u8] {
@@ -212,10 +217,9 @@ impl Indexer {
     fn empty_bins(&self) -> (u32, u32) {
         match self.format {
             IndexFormat::Tabix => (TABIX_MIN_SHIFT, TABIX_DEPTH),
-            IndexFormat::Csi { min_shift, depth } => (
-                min_shift,
-                depth.unwrap_or((TABIX_MAX_SHIFT + 2).saturating_sub(min_shift) / 3),
-            ),
+            IndexFormat::Csi { min_shift, depth } => {
+                (min_shift, depth.unwrap_or_else(|| default_depth(min_shift)))
+            }
         }
     }
 
@@ -251,24 +255,24 @@ impl Indexer {
         let name = interval.name;
         let limit = max_position(min_shift, depth);
         if interval.beg > limit || interval.end > limit {
-            return Err(match self.format {
-                IndexFormat::Tabix => format!(
-                    "line {number}: position {} on {:?} is beyond the tabix limit of 2^29 ({limit}); use a CSI index instead",
-                    interval.end.max(interval.beg),
-                    String::from_utf8_lossy(name),
-                ),
+            let limit = match self.format {
+                IndexFormat::Tabix => {
+                    format!("the tabix limit of 2^29 ({limit}); use a CSI index instead")
+                }
                 IndexFormat::Csi { .. } => format!(
-                    "line {number}: position {} on {:?} is beyond the limit of {limit} for a CSI index with min_shift={min_shift} and depth={depth}; increase csi_depth",
-                    interval.end.max(interval.beg),
-                    String::from_utf8_lossy(name),
+                    "the limit of {limit} for a CSI index with min_shift={min_shift} and depth={depth}; increase csi_depth"
                 ),
-            });
+            };
+            return Err(format!(
+                "line {number}: position {} on {:?} is beyond {limit}",
+                interval.end.max(interval.beg),
+                String::from_utf8_lossy(name),
+            ));
         }
-        let same_reference = self
+        let previous = self
             .last
-            .is_some_and(|(tid, _, _)| self.names.get_index(tid).is_some_and(|n| n == name));
-        let tid = if same_reference {
-            let (tid, previous_beg, line) = self.last.expect("a previous record exists");
+            .filter(|&(tid, _, _)| self.names.get_index(tid).is_some_and(|n| n == name));
+        let tid = if let Some((tid, previous_beg, line)) = previous {
             if interval.beg < previous_beg {
                 return Err(format!(
                     "line {number}: records are not sorted: this record on {:?} starts before the one on line {line}",
@@ -320,14 +324,13 @@ impl Indexer {
             let Some(end_offset) = blocks.resolve(record.end_position) else {
                 break;
             };
-            if self.builder.is_none() {
+            let builder = self.builder.get_or_insert_with(|| {
                 let (min_shift, depth) = self.bins.expect("bins are decided at the first record");
                 let first = blocks
                     .resolve(self.first_offset)
                     .expect("the first offset precedes the first record");
-                self.builder = Some(IndexBuilder::new(min_shift, depth, first));
-            }
-            let builder = self.builder.as_mut().expect("the builder exists");
+                IndexBuilder::new(min_shift, depth, first)
+            });
             builder.push(record.tid, record.beg, record.end, end_offset);
             self.pending.pop_front();
         }
@@ -438,8 +441,8 @@ pub struct Writer<W: Write> {
 
 impl<W: Write> Writer<W> {
     /// Creates a writer compressing at `level` (0-12) on `threads` threads.
-    pub fn new(sink: W, level: u8, threads: usize, index: Option<IndexOptions>) -> Result<Self> {
-        let (level, threads) = check_options(i64::from(level), threads as i64, index.as_ref())?;
+    pub fn new(sink: W, level: i64, threads: i64, index: Option<IndexOptions>) -> Result<Self> {
+        let (level, threads) = check_options(level, threads, index.as_ref())?;
         Ok(Self {
             blocks: BlockWriter::new(sink, level, threads)?,
             indexer: index.map(Indexer::create).transpose()?,
@@ -462,21 +465,20 @@ impl<W: Write> Writer<W> {
         self.blocks.buffered() + len >= BLOCK_SIZE
     }
 
-    fn check_stream(&self) -> Result<()> {
+    /// Refuses to go on once finished or after an I/O error, and, when `indexing`, after an
+    /// indexing error.
+    fn check(&self, indexing: bool) -> Result<()> {
         if self.finished {
             return Err(Error::Io(io::Error::other(
                 "I/O operation on a closed writer",
             )));
         }
-        self.check_io()
-    }
-
-    fn check(&self) -> Result<()> {
-        self.check_stream()?;
+        self.check_io()?;
         if let Some(message) = self
             .indexer
             .as_ref()
             .and_then(|indexer| indexer.failure.as_ref())
+            .filter(|_| indexing)
         {
             return Err(Error::Invalid(format!(
                 "indexing failed earlier: {message}"
@@ -500,7 +502,7 @@ impl<W: Write> Writer<W> {
 
     /// Writes `data`, indexing every line it completes.
     pub fn write(&mut self, data: &[u8]) -> Result<()> {
-        self.check()?;
+        self.check(true)?;
         let result = self.write_unchecked(data);
         self.guard(result)
     }
@@ -541,7 +543,7 @@ impl<W: Write> Writer<W> {
 
     /// Ends the current block and flushes everything written so far to the sink.
     pub fn flush(&mut self) -> Result<()> {
-        self.check_stream()?;
+        self.check(false)?;
         let result = self.blocks.flush().map_err(Error::Io);
         if let Some(indexer) = &mut self.indexer {
             indexer.resolve(&mut self.blocks);
@@ -551,7 +553,7 @@ impl<W: Write> Writer<W> {
 
     /// Returns the virtual position of the next byte to be written.
     pub fn tell(&mut self) -> Result<u64> {
-        self.check_stream()?;
+        self.check(false)?;
         let result = self.blocks.tell().map_err(Error::Io);
         self.guard(result)
     }

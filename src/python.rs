@@ -279,8 +279,6 @@ impl Writer {
         } else {
             Sink::Python(dest.clone().unbind())
         };
-        let level = u8::try_from(level).expect("the level was checked");
-        let threads = usize::try_from(threads).expect("threads were checked");
         let inner = CoreWriter::new(sink, level, threads, options).map_err(to_python)?;
         Ok(Self { inner })
     }
