@@ -12,6 +12,20 @@ HAS_HTSLIB = shutil.which("tabix") is not None and shutil.which("bgzip") is not 
 requires_htslib = pytest.mark.skipif(not HAS_HTSLIB, reason="tabix and bgzip are not installed")
 
 
+def htslib_version() -> tuple[int, ...]:
+    """Return the version of the installed tabix, or an empty tuple if there is none."""
+    if not HAS_HTSLIB:
+        return ()
+    result = subprocess.run(["tabix", "--version"], check=True, capture_output=True, text=True)
+    version = result.stdout.splitlines()[0].split()[-1]
+    return tuple(int(part) for part in version.split("+")[0].split(".") if part.isdigit())
+
+
+requires_htslib_1_23 = pytest.mark.skipif(
+    htslib_version() < (1, 23), reason="VCF end positions follow htslib 1.23 and later"
+)
+
+
 def tabix(*args: str | Path) -> str:
     """Run tabix and return its standard output."""
     result = subprocess.run(["tabix", *map(str, args)], check=True, capture_output=True, text=True)

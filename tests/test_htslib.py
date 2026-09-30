@@ -16,6 +16,7 @@ from pybgzf import IndexFormat
 from tests.helpers import bed_lines
 from tests.helpers import bed_text
 from tests.helpers import requires_htslib
+from tests.helpers import requires_htslib_1_23
 from tests.helpers import tabix
 from tests.indexes import read_index
 
@@ -142,11 +143,13 @@ X\t156040000\t.\tA\tG\t.\t.\t.\tGT\t1/1\t0/1
 """
 
 
+@requires_htslib_1_23
 @pytest.mark.parametrize("index", [TBI, CSI])
 def test_vcf(tmp_path: Path, index: IndexFormat) -> None:
     assert_same_index(tmp_path / "a.vcf.gz", VCF, index, Columns.VCF, "-p", "vcf")
 
 
+@requires_htslib_1_23
 def test_vcf_csi_depth_follows_contig_lengths(tmp_path: Path) -> None:
     long = VCF.replace("length=249250621", "length=90000000000").replace(
         "X\t156040000", "X\t100000000"
@@ -235,6 +238,7 @@ def test_flushes_between_lines(tmp_path: Path) -> None:
     assert read_index(ours) == read_index(htslib_index(path, TBI, "-p", "bed"))
 
 
+@requires_htslib_1_23
 def test_inferred_columns_index_like_tabix(tmp_path: Path) -> None:
     path = tmp_path / "stream"
     with pybgzf.open(path, index=TBI, index_path=tmp_path / "stream.tbi", columns=INFER) as handle:
