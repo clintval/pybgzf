@@ -50,65 +50,48 @@ impl Sniffer {
         }
     }
 
-    /// Returns the number of lines seen before a decision.
-    pub fn lines_seen(&self) -> u64 {
-        self.first_bytes.len() as u64
-    }
-
     /// Looks at the next line, without its line terminator, and returns the layout once one can
     /// be decided. Errors if the line is data that matches no known layout, or if an earlier line
     /// would not be a header line under the decided layout.
     pub fn push(&mut self, line: &[u8]) -> Result<Option<Columns>, String> {
-        let line_number = self.lines_seen() + 1;
+        let line_number = self.first_bytes.len() as u64 + 1;
         let headers = !self.bed_only;
         let decided = if headers && line.starts_with(b"##fileformat=VCF") {
             Columns::vcf()
         } else if headers && is_sam_header(line) {
             Columns::sam()
-        } else if headers && line.starts_with(b"##gff-version") {
-            Columns {
-                skip_lines: self.last_track_line,
-                ..Columns::gff()
-            }
-        } else if line.starts_with(b"track ") || line.starts_with(b"browser ") {
-            self.last_track_line = line_number;
-            self.first_bytes.push(line[0]);
-            return Ok(None);
-        } else if line.first() == Some(&b'#') {
-            self.first_bytes.push(b'#');
-            return Ok(None);
         } else {
-            let fields: Vec<&[u8]> = line.split(|&b| b == b'\t').collect();
-            if self.bed_only {
-                let columns = if fields.len() == 2 {
+            let columns = if headers && line.starts_with(b"##gff-version") {
+                Columns::gff()
+            } else if line.starts_with(b"track ") || line.starts_with(b"browser ") {
+                self.last_track_line = line_number;
+                self.first_bytes.push(line[0]);
+                return Ok(None);
+            } else if line.first() == Some(&b'#') {
+                self.first_bytes.push(b'#');
+                return Ok(None);
+            } else {
+                let fields: Vec<&[u8]> = line.split(|&b| b == b'\t').collect();
+                if self.bed_only && fields.len() == 2 {
+                    Columns::bed2()
+                } else if self.bed_only {
+                    Columns::bed()
+                } else if looks_like_gff(&fields) {
+                    Columns::gff()
+                } else if looks_like_bed(&fields) {
+                    Columns::bed()
+                } else if looks_like_bed2(&fields) {
                     Columns::bed2()
                 } else {
-                    Columns::bed()
-                };
-                Columns {
-                    skip_lines: self.last_track_line,
-                    ..columns
+                    return Err(format!(
+                        "line {line_number} does not look like BED, GFF, SAM, or VCF: {:?}; pass columns explicitly",
+                        String::from_utf8_lossy(line)
+                    ));
                 }
-            } else if looks_like_gff(&fields) {
-                Columns {
-                    skip_lines: self.last_track_line,
-                    ..Columns::gff()
-                }
-            } else if looks_like_bed(&fields) {
-                Columns {
-                    skip_lines: self.last_track_line,
-                    ..Columns::bed()
-                }
-            } else if looks_like_bed2(&fields) {
-                Columns {
-                    skip_lines: self.last_track_line,
-                    ..Columns::bed2()
-                }
-            } else {
-                return Err(format!(
-                    "line {line_number} does not look like BED, GFF, SAM, or VCF: {:?}; pass columns explicitly",
-                    String::from_utf8_lossy(line)
-                ));
+            };
+            Columns {
+                skip_lines: self.last_track_line,
+                ..columns
             }
         };
         for (i, &first) in self.first_bytes.iter().enumerate() {
