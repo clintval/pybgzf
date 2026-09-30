@@ -32,7 +32,7 @@ def data_dir(tmp_path_factory: pytest.TempPathFactory, lines: list[str]) -> Path
     for index in (IndexFormat.TBI, IndexFormat.CSI):
         path = directory / index.value / "features.bed.gz"
         path.parent.mkdir()
-        with pybgzf.open(path, threads=3, index=index, columns=Columns.BED) as handle:
+        with pybgzf.open_writer(path, threads=3, index=index, columns=Columns.BED) as handle:
             handle.write("#chrom\tstart\tend\tname\tscore\n")
             handle.writelines(lines)
     return directory
@@ -252,7 +252,7 @@ def test_queries_follow_the_columns_in_the_index(tmp_path: Path) -> None:
         "#comment\n"
         "chr1\tsrc\tgene\t401\t500\t.\t+\t.\tID=c\n"
     )
-    with pybgzf.open(path, index=IndexFormat.CSI, columns=pybgzf.INFER) as handle:
+    with pybgzf.open_writer(path, index=IndexFormat.CSI, columns=pybgzf.INFER) as handle:
         handle.write(text)
     with IndexedReader(path) as reader:
         assert reader.columns == Columns.GFF

@@ -256,7 +256,9 @@ def test_flushes_between_lines(tmp_path: Path) -> None:
 @requires_htslib_1_23
 def test_inferred_columns_index_like_tabix(tmp_path: Path) -> None:
     path = tmp_path / "stream"
-    with pybgzf.open(path, index=TBI, index_path=tmp_path / "stream.tbi", columns=INFER) as handle:
+    with pybgzf.open_writer(
+        path, index=TBI, index_path=tmp_path / "stream.tbi", columns=INFER
+    ) as handle:
         handle.write(VCF)
     assert read_index(tmp_path / "stream.tbi") == read_index(htslib_index(path, TBI, "-p", "vcf"))
 

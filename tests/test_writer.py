@@ -237,7 +237,7 @@ def test_sink_errors_keep_their_type() -> None:
 
 def test_text_mode(tmp_path: Path) -> None:
     path = tmp_path / "out.bed.gz"
-    with pybgzf.open(path, index=IndexFormat.TBI, columns=Columns.BED) as handle:
+    with pybgzf.open_writer(path, index=IndexFormat.TBI, columns=Columns.BED) as handle:
         assert isinstance(handle, io.TextIOWrapper)
         handle.write("chr1\t1\t10\tcafé\n")
         handle.write("chr1\t5\t10\tnaïve\n")
@@ -247,7 +247,7 @@ def test_text_mode(tmp_path: Path) -> None:
 
 def test_csv_writer(tmp_path: Path) -> None:
     path = tmp_path / "out.bed.gz"
-    with pybgzf.open(path, newline="", index=IndexFormat.TBI, columns=Columns.BED) as handle:
+    with pybgzf.open_writer(path, newline="", index=IndexFormat.TBI, columns=Columns.BED) as handle:
         writer = csv.writer(handle, delimiter="\t")
         writer.writerow(["#chrom", "start", "end"])
         for start in range(0, 100_000, 10):
@@ -369,14 +369,14 @@ def test_suffix_beats_content(tmp_path: Path) -> None:
 )
 def test_columns_are_inferred_from_content(tmp_path: Path, text: str, expected: Columns) -> None:
     path = tmp_path / "stream"
-    with pybgzf.open(path, index=IndexFormat.TBI, columns=INFER) as handle:
+    with pybgzf.open_writer(path, index=IndexFormat.TBI, columns=INFER) as handle:
         handle.write(text)
         handle.flush()
         writer = handle.buffer
         assert isinstance(writer, BgzfWriter)
         assert writer.columns == expected
     explicit = tmp_path / "explicit"
-    with pybgzf.open(explicit, index=IndexFormat.TBI, columns=expected) as handle:
+    with pybgzf.open_writer(explicit, index=IndexFormat.TBI, columns=expected) as handle:
         handle.write(text)
     assert read_index(Path(f"{path}.tbi")) == read_index(Path(f"{explicit}.tbi"))
 
@@ -469,7 +469,7 @@ def test_a_regular_file_gets_the_default_index_path(tmp_path: Path) -> None:
 def test_two_column_bed_is_inferred_as_bed2(
     tmp_path: Path, name: str, text: str, expected: Columns
 ) -> None:
-    with pybgzf.open(tmp_path / name, index=IndexFormat.TBI, columns=INFER) as handle:
+    with pybgzf.open_writer(tmp_path / name, index=IndexFormat.TBI, columns=INFER) as handle:
         handle.write(text)
         writer = handle.buffer
         assert isinstance(writer, BgzfWriter)
@@ -479,7 +479,7 @@ def test_two_column_bed_is_inferred_as_bed2(
 def test_bed_accepts_lines_without_an_end(tmp_path: Path) -> None:
     for columns in (Columns.BED, Columns.BED2):
         path = tmp_path / f"{columns.end}.bed.gz"
-        with pybgzf.open(path, index=IndexFormat.TBI, columns=columns) as handle:
+        with pybgzf.open_writer(path, index=IndexFormat.TBI, columns=columns) as handle:
             handle.write("chr1\t5\nchr1\t9\t20\n")
         assert Path(f"{path}.tbi").exists()
 
@@ -550,3 +550,8 @@ def test_leaving_a_with_block_early_finishes_the_file(tmp_path: Path) -> None:
         raise RuntimeError
     assert path.read_bytes().endswith(EOF_MARKER)
     assert Path(f"{path}.tbi").exists()
+
+
+def test_open_writer_is_the_only_text_writer() -> None:
+    assert "open" not in pybgzf.__all__
+    assert not hasattr(pybgzf, "open")

@@ -11,7 +11,7 @@ from pybgzf._reader import open_reader
 from pybgzf._writer import BgzfWriter
 from pybgzf._writer import IndexFormat
 from pybgzf._writer import WritableBinary
-from pybgzf._writer import open  # noqa: A004
+from pybgzf._writer import open_writer
 
 __all__ = [
     "INFER",
@@ -24,6 +24,6 @@ __all__ = [
     "LineFormat",
     "ReadableBinary",
     "WritableBinary",
-    "open",
     "open_reader",
+    "open_writer",
 ]

@@ -215,7 +215,7 @@ class BgzfWriter(io.RawIOBase):
             super().close()
 
 
-def open(  # noqa: A001
+def open_writer(
     dest: str | os.PathLike[str] | WritableBinary,
     *,
     encoding: str | None = None,

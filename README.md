@@ -33,7 +33,7 @@ Write sorted BED lines as text and the index appears next to the file on close:
 >>> directory = Path(mkdtemp())
 >>> path = directory / "features.bed.gz"
 >>>
->>> with pybgzf.open(path, index=IndexFormat.TBI, columns=Columns.BED) as handle:
+>>> with pybgzf.open_writer(path, index=IndexFormat.TBI, columns=Columns.BED) as handle:
 ...     _ = handle.write("chr1\t100\t200\tgene-a\n")
 ...     _ = handle.write("chr1\t150\t300\tgene-b\n")
 ...     _ = handle.write("chr2\t10\t20\tgene-c\n")
