@@ -13,12 +13,6 @@ Install with pip or uv:
 ❯ pip install pybgzf
 ```
 
-Until the first release is on PyPI, install from GitHub, which builds from source with a [Rust toolchain](https://rustup.rs):
-
-```bash
-❯ pip install git+https://github.com/clintval/pybgzf
-```
-
 ## Introduction
 
 `pybgzf` writes blocked gzip (BGZF) files from Python and builds their tabix (`.tbi`) or CSI (`.csi`) index while it writes, so there is no second pass with `tabix`.
@@ -63,15 +57,6 @@ Stream bytes to a pipe or any binary file object, with columns inferred from the
 True
 
 ```
-
-## Features
-
-- Indexes are identical to what `tabix` builds from the same file, for BED, GFF, VCF, SAM, and custom columns (`tabix -s -b -e -0 -c -S`).
-- Compression runs on any number of threads and the output is byte-for-byte the same for every thread count.
-- Lines may be split across writes, so `csv` and other text writers work through `pybgzf.open`.
-- Unsorted input raises `ValueError` from the write that completes the offending line, naming its line number.
-- `columns=pybgzf.INFER` picks BED, GFF, VCF, or SAM from the file name or, when streaming, from the first lines.
-- The GIL is released while compressing and while waiting on compression threads.
 
 ## Benchmarks
 
