@@ -1,9 +1,12 @@
 //! Reading BGZF sequentially or by region through a tabix or CSI index.
 
 use std::fs::File;
-use std::io::{self, BufRead, BufReader, Read, Seek};
+use std::io::{self, BufRead, BufReader, Read, Seek, SeekFrom};
 use std::num::NonZero;
+use std::panic::{self, AssertUnwindSafe};
 use std::path::Path;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use indexmap::IndexSet;
 use noodles_bgzf::VirtualPosition;
@@ -14,56 +17,180 @@ use noodles_csi::binning_index::index::Header;
 use noodles_csi::binning_index::index::header::Format;
 use noodles_csi::binning_index::index::header::format::CoordinateSystem;
 use noodles_csi::binning_index::index::reference_sequence::bin::Chunk;
+use noodles_csi::binning_index::index::reference_sequence::index::Index as ReferenceIndex;
 
 use crate::columns::{Columns, Kind};
 use crate::index::max_position;
 
 const FILE_BUFFER: usize = 128 * 1024;
 
+/// Keeps reads off a noodles fast path that repeats the last block at the end of a stream
+/// without an end-of-file marker.
+const SERIAL_READ_LIMIT: usize = u16::MAX as usize;
+
+/// A source that counts the compressed bytes read from it, so that bytes after the last complete
+/// block, such as a truncated block header, are noticed.
+struct Tracked<R> {
+    inner: R,
+    offset: Arc<AtomicU64>,
+}
+
+impl<R: Read> Read for Tracked<R> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        let n = self.inner.read(buf)?;
+        self.offset.fetch_add(n as u64, Ordering::Relaxed);
+        Ok(n)
+    }
+}
+
+impl<R: Seek> Seek for Tracked<R> {
+    fn seek(&mut self, position: SeekFrom) -> io::Result<u64> {
+        let offset = self.inner.seek(position)?;
+        self.offset.store(offset, Ordering::Relaxed);
+        Ok(offset)
+    }
+}
+
 enum Inner<R: Read + Send + 'static> {
-    Serial(SerialReader<R>),
-    Parallel(MultithreadedReader<R>),
+    Serial(SerialReader<Tracked<R>>),
+    Parallel(MultithreadedReader<Tracked<R>>),
+    Exhausted { source: Tracked<R>, position: u64 },
+    Failed { position: u64 },
 }
 
 /// Decompresses BGZF in the calling thread or on worker threads, tracking virtual positions.
 pub struct BgzfReader<R: Read + Seek + Send + 'static> {
     inner: Inner<R>,
+    threads: NonZero<usize>,
+    offset: Arc<AtomicU64>,
+}
+
+fn parallel<R: Read + Send + 'static>(
+    threads: NonZero<usize>,
+    source: R,
+) -> io::Result<MultithreadedReader<R>> {
+    panic::catch_unwind(AssertUnwindSafe(|| {
+        MultithreadedReader::with_worker_count(threads, source)
+    }))
+    .map_err(|_| io::Error::other("could not start the decompression threads"))
+}
+
+fn failed_earlier() -> io::Error {
+    io::Error::other("the reader failed earlier")
+}
+
+fn not_in_file(position: u64) -> io::Error {
+    io::Error::new(
+        io::ErrorKind::InvalidInput,
+        format!("virtual offset {position} is not in this file"),
+    )
 }
 
 impl BgzfReader<BufReader<File>> {
     /// Opens a BGZF file.
     pub fn from_path<P: AsRef<Path>>(path: P, threads: NonZero<usize>) -> io::Result<Self> {
         let file = BufReader::with_capacity(FILE_BUFFER, File::open(path)?);
-        Ok(Self::new(file, threads))
+        Self::new(file, threads)
     }
 }
 
 impl<R: Read + Seek + Send + 'static> BgzfReader<R> {
     /// Reads BGZF from `source`, decompressing on `threads` worker threads when more than one.
-    pub fn new(source: R, threads: NonZero<usize>) -> Self {
-        let inner = if threads.get() == 1 {
+    pub fn new(source: R, threads: NonZero<usize>) -> io::Result<Self> {
+        let offset = Arc::new(AtomicU64::new(0));
+        let source = Tracked {
+            inner: source,
+            offset: Arc::clone(&offset),
+        };
+        let mut reader = Self {
+            inner: Inner::Failed { position: 0 },
+            threads,
+            offset,
+        };
+        reader.start(source)?;
+        Ok(reader)
+    }
+
+    fn start(&mut self, source: Tracked<R>) -> io::Result<()> {
+        self.inner = if self.threads.get() == 1 {
             Inner::Serial(SerialReader::new(source))
         } else {
-            Inner::Parallel(MultithreadedReader::with_worker_count(threads, source))
+            Inner::Parallel(parallel(self.threads, source)?)
         };
-        Self { inner }
+        Ok(())
     }
 
     /// Returns the virtual position of the next byte to be read.
     pub fn virtual_position(&self) -> u64 {
-        u64::from(match &self.inner {
-            Inner::Serial(reader) => reader.virtual_position(),
-            Inner::Parallel(reader) => reader.virtual_position(),
-        })
+        match &self.inner {
+            Inner::Serial(reader) => u64::from(reader.virtual_position()),
+            Inner::Parallel(reader) => u64::from(reader.virtual_position()),
+            Inner::Exhausted { position, .. } | Inner::Failed { position } => *position,
+        }
+    }
+
+    fn compressed_position(&self) -> u64 {
+        match &self.inner {
+            Inner::Serial(reader) => reader.position(),
+            Inner::Parallel(reader) => reader.position(),
+            Inner::Exhausted { position, .. } | Inner::Failed { position } => position >> 16,
+        }
     }
 
     /// Moves to a virtual position, which must be the start of a line or record for the reads
-    /// that follow to make sense.
+    /// that follow to make sense, or the end of the file.
+    ///
+    /// Errors with [`io::ErrorKind::InvalidInput`] if the position is in no block of the file.
     pub fn seek(&mut self, position: u64) -> io::Result<()> {
-        let position = VirtualPosition::from(position);
-        match &mut self.inner {
-            Inner::Serial(reader) => reader.seek(position).map(drop),
-            Inner::Parallel(reader) => reader.seek_to_virtual_position(position).map(drop),
+        if let Inner::Exhausted { .. } = self.inner
+            && let Inner::Exhausted { source, .. } =
+                std::mem::replace(&mut self.inner, Inner::Failed { position: 0 })
+        {
+            self.start(source)?;
+        }
+        let target = VirtualPosition::from(position);
+        let (block, offset) = target.into();
+        let sought = match &mut self.inner {
+            Inner::Serial(reader) => reader.seek(target).map(drop),
+            Inner::Parallel(reader) => reader.seek_to_virtual_position(target).map(drop),
+            Inner::Exhausted { .. } | Inner::Failed { .. } => return Err(failed_earlier()),
+        };
+        // Some systems refuse to seek a file past their largest offset rather than past its end.
+        sought.map_err(|error| match error.kind() {
+            io::ErrorKind::InvalidInput => not_in_file(position),
+            _ => error,
+        })?;
+        if self.compressed_position() == block {
+            let mut source = self.stop()?;
+            let end = source.seek(SeekFrom::End(0))?;
+            let at_end = block == end && offset == 0;
+            let position = if at_end { position } else { end << 16 };
+            self.inner = Inner::Exhausted { source, position };
+            return if at_end {
+                Ok(())
+            } else {
+                Err(not_in_file(position))
+            };
+        }
+        if self.virtual_position() == position {
+            return Ok(());
+        }
+        if offset == 0 && self.fill_buf()?.is_empty() {
+            let source = self.stop()?;
+            self.inner = Inner::Exhausted { source, position };
+            return Ok(());
+        }
+        Err(not_in_file(position))
+    }
+
+    /// Stops any worker threads and returns the source, reporting any error they met.
+    fn stop(&mut self) -> io::Result<Tracked<R>> {
+        let position = self.virtual_position();
+        match std::mem::replace(&mut self.inner, Inner::Failed { position }) {
+            Inner::Serial(reader) => Ok(reader.into_inner()),
+            Inner::Parallel(mut reader) => reader.finish(),
+            Inner::Exhausted { source, .. } => Ok(source),
+            Inner::Failed { .. } => Err(failed_earlier()),
         }
     }
 
@@ -85,29 +212,80 @@ impl<R: Read + Seek + Send + 'static> BgzfReader<R> {
         Ok(filled)
     }
 
+    /// Returns true if blocks are read ahead on another thread, which may be waiting for data.
+    pub fn reads_ahead(&self) -> bool {
+        matches!(self.inner, Inner::Parallel(_))
+    }
+
     /// Stops any worker threads and returns the source.
-    pub fn finish(self) -> io::Result<R> {
-        match self.inner {
-            Inner::Serial(reader) => Ok(reader.into_inner()),
-            Inner::Parallel(mut reader) => reader.finish(),
+    pub fn finish(mut self) -> io::Result<R> {
+        self.stop().map(|source| source.inner)
+    }
+
+    /// Checks at the end of the stream that no bytes follow the last complete block, then, when
+    /// reading on threads, stops them, which reports any error they met, such as a corrupt block.
+    fn exhaust(&mut self) -> io::Result<()> {
+        let consumed = self.compressed_position();
+        let read = self.offset.load(Ordering::Relaxed);
+        if read > consumed {
+            let position = self.virtual_position();
+            let parallel = matches!(self.inner, Inner::Parallel(_));
+            if parallel {
+                self.stop()?;
+            }
+            self.inner = Inner::Failed { position };
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                format!(
+                    "the BGZF file is truncated: {} bytes follow the last complete block",
+                    read - consumed
+                ),
+            ));
         }
+        if let Inner::Parallel(_) = self.inner {
+            let position = self.virtual_position();
+            let source = self.stop()?;
+            self.inner = Inner::Exhausted { source, position };
+        }
+        Ok(())
     }
 }
 
 impl<R: Read + Seek + Send + 'static> Read for BgzfReader<R> {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        match &mut self.inner {
-            Inner::Serial(reader) => reader.read(buf),
-            Inner::Parallel(reader) => reader.read(buf),
+        if let Inner::Serial(reader) = &mut self.inner {
+            let n = buf.len().min(SERIAL_READ_LIMIT);
+            let n = reader.read(&mut buf[..n])?;
+            if n > 0 || buf.is_empty() {
+                return Ok(n);
+            }
+            self.exhaust()?;
+            return Ok(0);
         }
+        let data = self.fill_buf()?;
+        let n = data.len().min(buf.len());
+        buf[..n].copy_from_slice(&data[..n]);
+        self.consume(n);
+        Ok(n)
     }
 }
 
 impl<R: Read + Seek + Send + 'static> BufRead for BgzfReader<R> {
     fn fill_buf(&mut self) -> io::Result<&[u8]> {
+        let empty = match &mut self.inner {
+            Inner::Serial(reader) => reader.fill_buf()?.is_empty(),
+            Inner::Parallel(reader) => reader.fill_buf()?.is_empty(),
+            Inner::Exhausted { .. } => false,
+            Inner::Failed { .. } => return Err(failed_earlier()),
+        };
+        if empty {
+            self.exhaust()?;
+        }
         match &mut self.inner {
             Inner::Serial(reader) => reader.fill_buf(),
             Inner::Parallel(reader) => reader.fill_buf(),
+            Inner::Exhausted { .. } => Ok(&[]),
+            Inner::Failed { .. } => Err(failed_earlier()),
         }
     }
 
@@ -115,6 +293,7 @@ impl<R: Read + Seek + Send + 'static> BufRead for BgzfReader<R> {
         match &mut self.inner {
             Inner::Serial(reader) => reader.consume(amount),
             Inner::Parallel(reader) => reader.consume(amount),
+            Inner::Exhausted { .. } | Inner::Failed { .. } => {}
         }
     }
 }
@@ -156,10 +335,30 @@ impl AnyIndex {
 
     fn chunks(&self, tid: usize, interval: Interval) -> io::Result<Vec<Chunk>> {
         match self {
-            AnyIndex::Tabix(index) => index.query(tid, interval),
-            AnyIndex::Csi(index) => index.query(tid, interval),
+            AnyIndex::Tabix(index) => clipped_chunks(index, tid, interval),
+            AnyIndex::Csi(index) => clipped_chunks(index, tid, interval),
         }
     }
+}
+
+/// Returns the chunks overlapping `interval`, skipping what precedes the first record that could
+/// overlap it, as recorded in the linear or binned index, as htslib does.
+fn clipped_chunks<I: ReferenceIndex>(
+    index: &noodles_csi::binning_index::Index<I>,
+    tid: usize,
+    interval: Interval,
+) -> io::Result<Vec<Chunk>> {
+    let chunks = index.query(tid, interval)?;
+    let Some(reference) = index.reference_sequences().get(tid) else {
+        return Ok(chunks);
+    };
+    let start = interval.start().unwrap_or(Position::MIN);
+    let min = reference.min_offset(index.min_shift(), index.depth(), start);
+    Ok(chunks
+        .into_iter()
+        .filter(|chunk| chunk.end() > min)
+        .map(|chunk| Chunk::new(chunk.start().max(min), chunk.end()))
+        .collect())
 }
 
 /// Returns the columns an index header describes.
@@ -198,6 +397,7 @@ pub struct Query {
     next_chunk: usize,
     chunk_end: Option<u64>,
     position: Option<u64>,
+    failure: Option<String>,
     done: bool,
 }
 
@@ -256,20 +456,21 @@ impl<R: Read + Seek + Send + 'static> IndexedReader<R> {
             next_chunk: 0,
             chunk_end: None,
             position: None,
+            failure: None,
             done: true,
         };
         let Some(tid) = self.names.get_index_of(name) else {
             return Ok(query);
         };
-        let clamped_end = end.min(limit - 1);
-        if beg >= clamped_end {
+        if beg >= end {
             return Ok(query);
         }
         let to_position = |value: i64| {
             Position::new(usize::try_from(value).map_err(io::Error::other)?)
                 .ok_or_else(|| io::Error::other("positions are 1-based"))
         };
-        let interval = Interval::from(to_position(beg + 1)?..=to_position(clamped_end)?);
+        let (first, last) = (beg.min(limit - 2) + 1, end.min(limit - 1));
+        let interval = Interval::from(to_position(first)?..=to_position(last)?);
         query.tid = tid;
         query.chunks = self.index.chunks(tid, interval)?;
         query.done = query.chunks.is_empty();
@@ -278,12 +479,19 @@ impl<R: Read + Seek + Send + 'static> IndexedReader<R> {
 
     /// Reads the next lines of `query`, without their line terminators, appending up to about
     /// `budget` bytes of them to `lines`. Returns false once the query is exhausted.
+    ///
+    /// A line that cannot be parsed, or that overlaps the region but is not UTF-8, is an error
+    /// returned once the lines before it have been.
     pub fn next_lines(
         &mut self,
         query: &mut Query,
-        lines: &mut Vec<Vec<u8>>,
+        lines: &mut Vec<String>,
         budget: usize,
     ) -> Result<bool, QueryError> {
+        if let Some(message) = query.failure.take() {
+            query.done = true;
+            return Err(QueryError::Invalid(message));
+        }
         let mut used = 0;
         while !query.done && used < budget {
             if query
@@ -308,6 +516,7 @@ impl<R: Read + Seek + Send + 'static> IndexedReader<R> {
                 query.chunk_end = Some(u64::from(chunk.end()));
                 query.next_chunk += 1;
             }
+            let offset = self.reader.virtual_position();
             self.line.clear();
             if self.reader.read_line(&mut self.line)? == 0 {
                 query.done = true;
@@ -318,9 +527,16 @@ impl<R: Read + Seek + Send + 'static> IndexedReader<R> {
             if content.first() == Some(&self.columns.meta_char) {
                 continue;
             }
-            let interval = self.columns.parse(content).map_err(|message| {
-                QueryError::Invalid(format!("{message}: {:?}", String::from_utf8_lossy(content)))
-            })?;
+            let interval = match self.columns.parse(content) {
+                Ok(interval) => interval,
+                Err(message) => {
+                    let line = String::from_utf8_lossy(content);
+                    query.failure = Some(format!(
+                        "the line at virtual offset {offset} cannot be parsed: {message}: {line:?}"
+                    ));
+                    break;
+                }
+            };
             if self.names.get_index_of(interval.name) != Some(query.tid)
                 || interval.beg >= query.end
             {
@@ -328,8 +544,15 @@ impl<R: Read + Seek + Send + 'static> IndexedReader<R> {
                 break;
             }
             if interval.end > query.beg && query.end > interval.beg {
-                used += content.len();
-                lines.push(content.to_vec());
+                let Ok(text) = std::str::from_utf8(content) else {
+                    query.failure = Some(format!(
+                        "the line on {:?} at virtual offset {offset} is not UTF-8",
+                        String::from_utf8_lossy(interval.name)
+                    ));
+                    break;
+                };
+                used += text.len();
+                lines.push(text.to_owned());
             }
         }
         Ok(!query.done)
@@ -419,6 +642,18 @@ mod tests {
     }
 
     #[test]
+    fn truncated_input_is_an_error_with_any_thread_count() {
+        let data = bed(20_000);
+        let (_dir, path, _) = written(&data, IndexFormat::Tabix);
+        let compressed = std::fs::read(&path).unwrap();
+        let truncated = compressed[..compressed.len() / 2].to_vec();
+        for n in [1, 3] {
+            let mut reader = BgzfReader::new(Cursor::new(truncated.clone()), threads(n)).unwrap();
+            assert!(reader.read_to_end(&mut Vec::new()).is_err(), "threads={n}");
+        }
+    }
+
+    #[test]
     fn seeks_to_virtual_positions() {
         let data = bed(20_000);
         let (_dir, path, _) = written(&data, IndexFormat::Tabix);
@@ -442,14 +677,14 @@ mod tests {
         }
     }
 
-    fn brute_force(data: &[u8], name: &[u8], beg: i64, end: i64) -> Vec<Vec<u8>> {
+    fn brute_force(data: &[u8], name: &[u8], beg: i64, end: i64) -> Vec<String> {
         data.split(|&b| b == b'\n')
             .filter(|line| !line.is_empty())
             .filter(|line| {
                 let parsed = Columns::bed().parse(line).unwrap();
                 parsed.name == name && parsed.beg < end && parsed.end > beg && beg < end
             })
-            .map(<[u8]>::to_vec)
+            .map(|line| String::from_utf8(line.to_vec()).unwrap())
             .collect()
     }
 
@@ -490,6 +725,17 @@ mod tests {
     }
 
     #[test]
+    fn queries_start_at_the_linear_index() {
+        let data = bed(20_000);
+        let (_dir, path, index_path) = written(&data, IndexFormat::Tabix);
+        let reader = BgzfReader::from_path(&path, threads(1)).unwrap();
+        let indexed = IndexedReader::new(reader, AnyIndex::read(&index_path).unwrap()).unwrap();
+        let query = indexed.query(b"chr1", 700_000, 700_100).unwrap();
+        let first = u64::from(query.chunks[0].start());
+        assert!(first >> 16 > 0, "the query starts at {first}");
+    }
+
+    #[test]
     fn interleaved_queries_keep_their_place() {
         let data = bed(5000);
         let (_dir, path, index_path) = written(&data, IndexFormat::Tabix);
@@ -527,6 +773,7 @@ mod tests {
         assert!(AnyIndex::read(&path).is_err());
         assert!(
             BgzfReader::new(Cursor::new(Vec::new()), threads(1))
+                .unwrap()
                 .read_line(&mut Vec::new())
                 .is_ok()
         );

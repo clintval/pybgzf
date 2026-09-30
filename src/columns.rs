@@ -18,15 +18,6 @@ impl Kind {
             Kind::Vcf => "vcf",
         }
     }
-
-    pub fn from_name(name: &str) -> Option<Self> {
-        match name {
-            "generic" => Some(Kind::Generic),
-            "sam" => Some(Kind::Sam),
-            "vcf" => Some(Kind::Vcf),
-            _ => None,
-        }
-    }
 }
 
 /// Which columns hold each line's reference, start, and end, like `tabix -s -b -e -0 -c -S`.
@@ -194,9 +185,9 @@ fn start_column(
         end = beg;
     }
     if !zero_based {
-        beg -= 1;
+        beg = beg.saturating_sub(1);
     } else if bc <= ec {
-        end += 1;
+        end = end.saturating_add(1);
     }
     Ok((beg.max(0), end.max(1)))
 }
@@ -213,8 +204,9 @@ fn finish(name: Option<&[u8]>, beg: i64, end: i64, columns: usize) -> Result<Int
     }
 }
 
-/// Parses the leading integer of `bytes` like C's `strtoll` in base 10, returning the value
-/// and the number of bytes consumed, or `None` when there are no digits.
+/// Parses the leading base-10 integer of `bytes`, saturating, after optional whitespace and
+/// sign, returning the value and the number of bytes consumed, or `None` without digits.
+/// Unlike htslib, which calls `strtoll` in base 0, a leading `0` or `0x` is not octal or hex.
 fn integer_prefix(bytes: &[u8]) -> Option<(i64, usize)> {
     let mut i = bytes.iter().take_while(|b| b.is_ascii_whitespace()).count();
     let negative = match bytes.get(i) {
@@ -262,11 +254,11 @@ fn parse_sam(line: &[u8]) -> Result<Interval<'_>, String> {
                     let (count, used) = integer_prefix(&field[at..]).unwrap_or((0, 0));
                     let op = field.get(at + used).map_or(0, u8::to_ascii_uppercase);
                     if matches!(op, b'M' | b'D' | b'N') {
-                        length += count;
+                        length = length.saturating_add(count);
                     }
                     at += used + 1;
                 }
-                end = beg + if length == 0 { 1 } else { length };
+                end = beg.saturating_add(if length == 0 { 1 } else { length });
                 break;
             }
             _ => {}
@@ -311,7 +303,7 @@ fn parse_vcf(line: &[u8]) -> Result<Interval<'_>, String> {
             2 => (beg, end) = start_column(field, 2, 0, false, end)?,
             4 => {
                 if !field.is_empty() {
-                    end = beg + field.len() as i64;
+                    end = beg.saturating_add(field.len() as i64);
                 }
                 allele_count += 1;
                 svlen_alleles.push(false);
@@ -349,7 +341,7 @@ fn parse_vcf(line: &[u8]) -> Result<Interval<'_>, String> {
                     }
                     let length =
                         if uses_svlen && svlen_alleles.get(allele).copied().unwrap_or(false) {
-                            integer_or_zero(value).abs()
+                            integer_or_zero(value).saturating_abs()
                         } else {
                             1
                         };
@@ -379,7 +371,7 @@ fn parse_vcf(line: &[u8]) -> Result<Interval<'_>, String> {
             _ => {}
         }
     }
-    let longest = reflen.max(svlen).max(fmtlen) + beg;
+    let longest = reflen.max(svlen).max(fmtlen).saturating_add(beg);
     end = end.max(longest);
     finish(name, beg, end, 2)
 }
@@ -510,6 +502,24 @@ mod tests {
         assert_eq!(interval(&vcf, line), named("1", 99, 159));
         let without_len = "1\t100\t.\tA\t<*>\t.\t.\t.\tGT\t0/0";
         assert_eq!(interval(&vcf, without_len), named("1", 99, 100));
+    }
+
+    #[test]
+    fn extreme_positions_saturate() {
+        let max = i64::MAX;
+        let huge = "99999999999999999999";
+        let bed2 = Columns::bed2();
+        assert_eq!(interval(&bed2, &format!("c\t{huge}")), named("c", max, max));
+        let gff = Columns::gff();
+        let line = format!("c\ts\tt\t-{huge}\t{huge}");
+        assert_eq!(interval(&gff, &line), named("c", 0, max));
+        let sam = format!("r\t0\tc\t{huge}\t60\t{huge}M{huge}D\t*\t0\t0\tA\tI");
+        assert_eq!(interval(&Columns::sam(), &sam), named("c", max - 1, max));
+        let vcf = Columns::vcf();
+        let line = format!("c\t{huge}\t.\tACGT\t<DEL>\t.\t.\tSVLEN=-{huge}");
+        assert_eq!(interval(&vcf, &line), named("c", max - 1, max));
+        let line = format!("c\t5\t.\tA\t<*>\t.\t.\t.\tLEN\t{huge}");
+        assert_eq!(interval(&vcf, &line), named("c", 4, max));
     }
 
     #[test]

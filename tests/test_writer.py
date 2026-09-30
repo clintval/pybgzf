@@ -1,3 +1,4 @@
+import contextlib
 import csv
 import gzip
 import io
@@ -13,6 +14,9 @@ from pybgzf import INFER
 from pybgzf import BgzfWriter
 from pybgzf import Columns
 from pybgzf import IndexFormat
+from pybgzf import Infer
+from typing_extensions import Buffer
+from typing_extensions import override
 
 from tests.helpers import bed_text
 from tests.indexes import ParsedIndex
@@ -132,6 +136,10 @@ BED = Columns.BED
 INVALID_OPTIONS: list[tuple[Callable[[Path], BgzfWriter], str]] = [
     (lambda path: BgzfWriter(path, level=13), "level"),
     (lambda path: BgzfWriter(path, threads=0), "threads"),
+    (lambda path: BgzfWriter(path, threads=100_000), "threads must be between 1 and 1024"),
+    (lambda path: BgzfWriter(path, threads=-1), "threads must be between 1 and 1024"),
+    (lambda path: BgzfWriter(path, level=-1), "level must be between 0 and 12, not -1"),
+    (lambda path: BgzfWriter(path, level=256), "level must be between 0 and 12, not 256"),
     (
         lambda path: BgzfWriter(path, index=IndexFormat.TBI),
         "columns is required when index is set",
@@ -139,6 +147,14 @@ INVALID_OPTIONS: list[tuple[Callable[[Path], BgzfWriter], str]] = [
     (lambda path: BgzfWriter(path, index_path="x.tbi"), "only used when index is set"),
     (lambda path: BgzfWriter(path, index=CSI, columns=BED, csi_min_shift=0), "csi_min_shift"),
     (lambda path: BgzfWriter(path, index=CSI, columns=BED, csi_depth=12), "csi_depth"),
+    (
+        lambda path: BgzfWriter(path, index=CSI, columns=BED, csi_min_shift=-1),
+        "csi_min_shift must be between 1 and 31, not -1",
+    ),
+    (
+        lambda path: BgzfWriter(path, index=CSI, columns=BED, csi_depth=-1),
+        "csi_depth must be between 1 and 9, not -1",
+    ),
 ]
 
 
@@ -220,11 +236,13 @@ def test_sink_errors_keep_their_type() -> None:
         writer.write(b"x" * (BLOCK_SIZE + 1))
     with pytest.raises(OSError, match="failed earlier"):
         writer.write(b"x")
+    with pytest.raises(OSError, match="failed earlier"):
+        writer.close()
 
 
 def test_text_mode(tmp_path: Path) -> None:
     path = tmp_path / "out.bed.gz"
-    with pybgzf.open(path, index=IndexFormat.TBI, columns=Columns.BED) as handle:
+    with pybgzf.writer(path, index=IndexFormat.TBI, columns=Columns.BED) as handle:
         assert isinstance(handle, io.TextIOWrapper)
         handle.write("chr1\t1\t10\tcafé\n")
         handle.write("chr1\t5\t10\tnaïve\n")
@@ -234,7 +252,7 @@ def test_text_mode(tmp_path: Path) -> None:
 
 def test_csv_writer(tmp_path: Path) -> None:
     path = tmp_path / "out.bed.gz"
-    with pybgzf.open(path, newline="", index=IndexFormat.TBI, columns=Columns.BED) as handle:
+    with pybgzf.writer(path, newline="", index=IndexFormat.TBI, columns=Columns.BED) as handle:
         writer = csv.writer(handle, delimiter="\t")
         writer.writerow(["#chrom", "start", "end"])
         for start in range(0, 100_000, 10):
@@ -270,7 +288,7 @@ def test_bad_lines_are_value_errors(tmp_path: Path) -> None:
         with pytest.raises(ValueError, match=r"line 1: column 2 is not an integer"):
             writer.write(b"chr1\tone\t2\n")
     with BgzfWriter(tmp_path / "b.bed.gz", index=IndexFormat.TBI, columns=Columns.BED) as writer:
-        with pytest.raises(ValueError, match=r"line 1: the end 5 is before the start 11"):
+        with pytest.raises(ValueError, match=r"line 1: the end 5 is before the start 10"):
             writer.write(b"chr1\t10\t5\n")
 
 
@@ -356,14 +374,14 @@ def test_suffix_beats_content(tmp_path: Path) -> None:
 )
 def test_columns_are_inferred_from_content(tmp_path: Path, text: str, expected: Columns) -> None:
     path = tmp_path / "stream"
-    with pybgzf.open(path, index=IndexFormat.TBI, columns=INFER) as handle:
+    with pybgzf.writer(path, index=IndexFormat.TBI, columns=INFER) as handle:
         handle.write(text)
         handle.flush()
         writer = handle.buffer
         assert isinstance(writer, BgzfWriter)
         assert writer.columns == expected
     explicit = tmp_path / "explicit"
-    with pybgzf.open(explicit, index=IndexFormat.TBI, columns=expected) as handle:
+    with pybgzf.writer(explicit, index=IndexFormat.TBI, columns=expected) as handle:
         handle.write(text)
     assert read_index(Path(f"{path}.tbi")) == read_index(Path(f"{explicit}.tbi"))
 
@@ -456,7 +474,7 @@ def test_a_regular_file_gets_the_default_index_path(tmp_path: Path) -> None:
 def test_two_column_bed_is_inferred_as_bed2(
     tmp_path: Path, name: str, text: str, expected: Columns
 ) -> None:
-    with pybgzf.open(tmp_path / name, index=IndexFormat.TBI, columns=INFER) as handle:
+    with pybgzf.writer(tmp_path / name, index=IndexFormat.TBI, columns=INFER) as handle:
         handle.write(text)
         writer = handle.buffer
         assert isinstance(writer, BgzfWriter)
@@ -466,6 +484,166 @@ def test_two_column_bed_is_inferred_as_bed2(
 def test_bed_accepts_lines_without_an_end(tmp_path: Path) -> None:
     for columns in (Columns.BED, Columns.BED2):
         path = tmp_path / f"{columns.end}.bed.gz"
-        with pybgzf.open(path, index=IndexFormat.TBI, columns=columns) as handle:
+        with pybgzf.writer(path, index=IndexFormat.TBI, columns=columns) as handle:
             handle.write("chr1\t5\nchr1\t9\t20\n")
         assert Path(f"{path}.tbi").exists()
+
+
+@pytest.mark.parametrize(
+    "header",
+    [
+        "##fileformat=VCFv4.3\n##contig=<ID=chr1,length=4611686018427387904>\n",
+        "##fileformat=VCFv4.3\n##contig=<ID=chr1,length=9223372036854775807>\n",
+        "##fileformat=VCFv4.3\n##contig=<ID=chr1,length=99999999999999999999>\n",
+    ],
+)
+def test_references_too_long_for_csi_raise(tmp_path: Path, header: str) -> None:
+    path = tmp_path / "long.vcf.gz"
+    with BgzfWriter(path, index=IndexFormat.CSI, columns=Columns.VCF) as writer:
+        writer.write(header.encode())
+        with pytest.raises(ValueError, match="too long for a CSI index"):
+            writer.write(b"chr1\t100\t.\tA\tT\t.\t.\t.\n")
+    assert not Path(f"{path}.csi").exists()
+
+
+def test_sam_references_too_long_for_csi_raise(tmp_path: Path) -> None:
+    path = tmp_path / "long.sam.gz"
+    with BgzfWriter(path, index=IndexFormat.CSI, columns=Columns.SAM) as writer:
+        writer.write(b"@SQ\tSN:chr1\tLN:4611686018427387904\n")
+        with pytest.raises(ValueError, match="too long for a CSI index"):
+            writer.write(b"r\t0\tchr1\t5\t60\t4M\t*\t0\t0\tACGT\tIIII\n")
+
+
+def test_huge_cigar_lengths_saturate(tmp_path: Path) -> None:
+    with BgzfWriter(tmp_path / "a.sam.gz", index=IndexFormat.CSI, columns=Columns.SAM) as writer:
+        with pytest.raises(ValueError, match="beyond the limit"):
+            writer.write(b"r\t0\tchr1\t5\t60\t9223372036854775807M2M\t*\t0\t0\tA\tI\n")
+
+
+EOF_MARKER = bytes.fromhex("1f8b08040000000000ff0600424302001b0003000000000000000000")
+
+
+@pytest.mark.parametrize(
+    ("data", "columns"),
+    [
+        (b"chr1\t100\t200\nchr1\t50\t60\n", Columns.BED),
+        (b"chr1\t100\t200\nchr1\t50", Columns.BED),
+        (b"# nothing but comments\n", INFER),
+    ],
+    ids=["unsorted", "unterminated", "uninferred"],
+)
+@pytest.mark.parametrize("threads", [1, 3])
+def test_an_indexing_error_leaves_the_file_visibly_truncated(
+    tmp_path: Path, data: bytes, columns: Columns | Infer, threads: int
+) -> None:
+    path = tmp_path / "out.bed.gz"
+    writer = BgzfWriter(path, threads=threads, index=IndexFormat.TBI, columns=columns)
+    with pytest.raises(ValueError):
+        writer.write(data)
+        writer.close()
+    writer.close()
+    compressed = path.read_bytes()
+    assert not compressed.endswith(EOF_MARKER)
+    assert gzip.decompress(compressed) in (data, data[: data.index(b"\n") + 1])
+    assert not Path(f"{path}.tbi").exists()
+
+
+def test_leaving_a_with_block_early_finishes_the_file(tmp_path: Path) -> None:
+    path = tmp_path / "out.bed.gz"
+    with pytest.raises(RuntimeError), BgzfWriter(path, index=IndexFormat.TBI, columns=BED) as w:
+        w.write(b"chr1\t1\t2\n")
+        raise RuntimeError
+    assert path.read_bytes().endswith(EOF_MARKER)
+    assert Path(f"{path}.tbi").exists()
+
+
+def test_open_writer_is_the_only_text_writer() -> None:
+    assert "open" not in pybgzf.__all__
+    assert not hasattr(pybgzf, "open")
+
+
+class _FailsOnce(io.RawIOBase):
+    def __init__(self, failing_call: int) -> None:
+        super().__init__()
+        self.calls: int = 0
+        self.failing_call: int = failing_call
+        self.received: bytearray = bytearray()
+
+    @override
+    def writable(self) -> bool:
+        return True
+
+    @override
+    def write(self, data: Buffer, /) -> int:
+        self.calls += 1
+        if self.calls == self.failing_call:
+            raise OSError(28, "No space left on device")
+        self.received.extend(bytes(data))
+        return len(memoryview(data))
+
+
+@pytest.mark.parametrize("threads", [1, 4])
+def test_tell_after_a_sink_failure_raises(threads: int) -> None:
+    sink = _FailsOnce(failing_call=2)
+    writer = BgzfWriter(sink, threads=threads)
+    with pytest.raises(OSError, match="No space left"):
+        writer.write(bytes(range(256)) * 4096 * 4)
+    received = bytes(sink.received)
+    with pytest.raises(OSError, match="failed earlier"):
+        writer.tell()
+    assert bytes(sink.received) == received
+    with pytest.raises(OSError, match="failed earlier"):
+        writer.close()
+
+
+@pytest.mark.parametrize("lines", [10_000, 1], ids=["mid-stream", "end-of-file marker"])
+def test_a_sink_failure_removes_a_stale_index(tmp_path: Path, lines: int) -> None:
+    index_path = tmp_path / "stale.tbi"
+    index_path.write_bytes(b"an index from an earlier run")
+    writer = BgzfWriter(
+        _FailsOnce(failing_call=2), index=IndexFormat.TBI, index_path=index_path, columns=BED
+    )
+    with pytest.raises(OSError, match="No space left"):
+        writer.write(b"".join(b"chr1\t%d\t%d\n" % (i, i + 10) for i in range(lines)))
+        writer.close()
+    with contextlib.suppress(OSError):
+        writer.close()
+    assert not index_path.exists()
+
+
+def test_an_index_path_that_cannot_be_created_fails_at_once(tmp_path: Path) -> None:
+    index_path = tmp_path / "missing" / "out.tbi"
+    with pytest.raises(FileNotFoundError, match="missing"):
+        BgzfWriter(io.BytesIO(), index=IndexFormat.TBI, index_path=index_path, columns=BED)
+
+
+def test_reference_names_with_a_nul_byte_raise(tmp_path: Path) -> None:
+    with BgzfWriter(tmp_path / "a.bed.gz", index=IndexFormat.TBI, columns=BED) as writer:
+        writer.write(b"chr1\t1\t2\n")
+        with pytest.raises(ValueError, match=r"^line 2: the reference name .* contains a NUL byte"):
+            writer.write(b"ch\x00r2\t1\t2\n")
+
+
+def test_flush_and_tell_work_after_an_indexing_error(tmp_path: Path) -> None:
+    with BgzfWriter(tmp_path / "out.bed.gz", index=IndexFormat.TBI, columns=BED) as writer:
+        writer.write(b"chr1\t100\t200\n")
+        with pytest.raises(ValueError, match="not sorted"):
+            writer.write(b"chr1\t50\t60\n")
+        writer.flush()
+        assert writer.tell() > 0
+
+
+def test_text_writes_raise_indexing_errors_at_once(tmp_path: Path) -> None:
+    path = tmp_path / "out.bed.gz"
+    with pybgzf.writer(path, index=IndexFormat.TBI, columns=Columns.BED) as handle:
+        handle.write("chr1\t100\t200\n")
+        with pytest.raises(ValueError, match="line 2: records are not sorted"):
+            handle.write("chr1\t50\t60\n")
+    assert not Path(f"{path}.tbi").exists()
+
+
+def test_open_writer_checks_the_encoding_first(tmp_path: Path) -> None:
+    path = tmp_path / "out.bed.gz"
+    with pytest.raises(LookupError):
+        pybgzf.writer(path, encoding="no-such-codec")
+    assert not path.exists()

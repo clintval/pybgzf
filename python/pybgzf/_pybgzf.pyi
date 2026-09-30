@@ -1,4 +1,5 @@
 from collections.abc import Iterator
+from typing import ClassVar
 from typing import final
 
 from typing_extensions import Buffer
@@ -8,7 +9,30 @@ from pybgzf._columns import ColumnsTuple
 from pybgzf._reader import ReadableBinary
 from pybgzf._writer import WritableBinary
 
+__all__ = [
+    "BLOCK_SIZE",
+    "IndexKind",
+    "IndexedReader",
+    "LineKind",
+    "QueryIterator",
+    "Reader",
+    "Sniffer",
+    "Writer",
+    "validate_columns",
+]
+
 BLOCK_SIZE: int
+
+@final
+class IndexKind:
+    TBI: ClassVar[IndexKind]
+    CSI: ClassVar[IndexKind]
+
+@final
+class LineKind:
+    GENERIC: ClassVar[LineKind]
+    SAM: ClassVar[LineKind]
+    VCF: ClassVar[LineKind]
 
 @final
 class Writer:
@@ -18,7 +42,7 @@ class Writer:
         *,
         level: int,
         threads: int,
-        index: str | None,
+        index: IndexKind | None,
         index_path: str | None,
         columns: ColumnsTuple | None,
         infer: bool,

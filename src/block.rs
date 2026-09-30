@@ -15,7 +15,7 @@ use std::thread::{self, JoinHandle};
 use bgzf::{BgzfError, CompressionLevel, Compressor};
 use crossbeam_channel::{Receiver, Sender, TryRecvError, bounded};
 
-/// The number of uncompressed bytes in every block except the last one, as in `bgzip`.
+/// The number of uncompressed bytes in a full block, as in `bgzip`; flushing ends a block early.
 pub const BLOCK_SIZE: usize = bgzf::BGZF_BLOCK_SIZE;
 
 /// The position of a byte as a block number and an offset into that block's uncompressed data.
@@ -69,11 +69,11 @@ fn spawn_workers(
     level: CompressionLevel,
     count: usize,
     jobs: &Receiver<Job>,
-) -> Vec<JoinHandle<()>> {
+) -> io::Result<Vec<JoinHandle<()>>> {
     (0..count)
         .map(|_| {
             let jobs = jobs.clone();
-            thread::spawn(move || {
+            thread::Builder::new().spawn(move || {
                 let mut compressor = Compressor::new(level);
                 while let Ok((input, mut output, reply)) = jobs.recv() {
                     let result =
@@ -88,12 +88,12 @@ fn spawn_workers(
 impl<W: Write> BlockWriter<W> {
     /// Creates a writer that compresses in the calling thread when `threads` is one, and on
     /// `threads` worker threads otherwise.
-    pub fn new(sink: W, level: CompressionLevel, threads: NonZero<usize>) -> Self {
+    pub fn new(sink: W, level: CompressionLevel, threads: NonZero<usize>) -> io::Result<Self> {
         let engine = if threads.get() == 1 {
             Engine::Serial(Compressor::new(level))
         } else {
             let (sender, receiver) = bounded(threads.get() * 2);
-            let workers = spawn_workers(level, threads.get(), &receiver);
+            let workers = spawn_workers(level, threads.get(), &receiver)?;
             Engine::Parallel {
                 jobs: Some(sender),
                 pending: VecDeque::new(),
@@ -101,7 +101,7 @@ impl<W: Write> BlockWriter<W> {
                 max_pending: threads.get() * 2,
             }
         };
-        Self {
+        Ok(Self {
             sink,
             buf: Vec::with_capacity(BLOCK_SIZE),
             engine,
@@ -113,7 +113,7 @@ impl<W: Write> BlockWriter<W> {
             spare_inputs: Vec::new(),
             spare_outputs: Vec::new(),
             finished: false,
-        }
+        })
     }
 
     /// Returns the position of the next byte to be written.
@@ -170,13 +170,25 @@ impl<W: Write> BlockWriter<W> {
     /// Writes all remaining data and the BGZF end-of-file marker, returning the virtual position
     /// of the marker.
     pub fn finish(&mut self) -> io::Result<u64> {
+        self.finish_with(true)
+    }
+
+    /// Writes all remaining data but no end-of-file marker, so that readers see the stream as
+    /// truncated, returning the virtual position where the marker would be.
+    pub fn abandon(&mut self) -> io::Result<u64> {
+        self.finish_with(false)
+    }
+
+    fn finish_with(&mut self, eof: bool) -> io::Result<u64> {
         self.end_block()?;
         self.wait_all()?;
         self.stop_workers();
         let eof_start = self.bytes_written;
-        let mut eof = Vec::new();
-        Compressor::append_eof(&mut eof);
-        self.sink.write_all(&eof)?;
+        if eof {
+            let mut marker = Vec::new();
+            Compressor::append_eof(&mut marker);
+            self.sink.write_all(&marker)?;
+        }
         self.sink.flush()?;
         self.finished = true;
         Ok(eof_start << 16)
@@ -221,6 +233,11 @@ impl<W: Write> BlockWriter<W> {
             self.window.pop_front();
             self.window_base += 1;
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn remembered_blocks(&self) -> usize {
+        self.window.len()
     }
 
     fn check_open(&self) -> io::Result<()> {
@@ -390,7 +407,7 @@ mod tests {
 
     #[test]
     fn empty_stream_is_only_the_eof_marker() {
-        let mut writer = BlockWriter::new(Vec::new(), level(6), threads(1));
+        let mut writer = BlockWriter::new(Vec::new(), level(6), threads(1)).unwrap();
         assert_eq!(writer.finish().unwrap(), 0);
         assert_eq!(writer.get_ref().len(), 28);
         assert!(decompress(writer.get_ref()).is_empty());
@@ -401,7 +418,7 @@ mod tests {
         let data = sample(BLOCK_SIZE * 7 + 1234);
         let mut outputs = Vec::new();
         for n in [1, 2, 3, 8] {
-            let mut writer = BlockWriter::new(Vec::new(), level(6), threads(n));
+            let mut writer = BlockWriter::new(Vec::new(), level(6), threads(n)).unwrap();
             for chunk in data.chunks(10_007) {
                 writer.write(chunk).unwrap();
             }
@@ -415,7 +432,7 @@ mod tests {
     #[test]
     fn positions_resolve_to_block_starts() {
         for n in [1, 4] {
-            let mut writer = BlockWriter::new(Vec::new(), level(6), threads(n));
+            let mut writer = BlockWriter::new(Vec::new(), level(6), threads(n)).unwrap();
             let mut marks = Vec::new();
             for chunk in sample(BLOCK_SIZE * 3 + 100).chunks(5000) {
                 writer.write(chunk).unwrap();
@@ -437,7 +454,7 @@ mod tests {
 
     #[test]
     fn a_full_block_moves_the_position_to_the_next_block() {
-        let mut writer = BlockWriter::new(Vec::new(), level(6), threads(1));
+        let mut writer = BlockWriter::new(Vec::new(), level(6), threads(1)).unwrap();
         writer.write(&sample(BLOCK_SIZE)).unwrap();
         assert_eq!(
             writer.position(),
@@ -451,7 +468,7 @@ mod tests {
     #[test]
     fn the_end_of_a_flushed_block_resolves_to_the_next_block() {
         for n in [1, 3] {
-            let mut writer = BlockWriter::new(Vec::new(), level(6), threads(n));
+            let mut writer = BlockWriter::new(Vec::new(), level(6), threads(n)).unwrap();
             writer.write(b"chr1\t1\t2\n").unwrap();
             let end_of_first = writer.position();
             writer.flush().unwrap();
@@ -467,7 +484,7 @@ mod tests {
 
     #[test]
     fn unwritten_positions_do_not_resolve() {
-        let mut writer = BlockWriter::new(Vec::new(), level(6), threads(1));
+        let mut writer = BlockWriter::new(Vec::new(), level(6), threads(1)).unwrap();
         writer.write(b"abc").unwrap();
         assert_eq!(writer.resolve(writer.position()), None);
         writer.end_block().unwrap();
@@ -483,7 +500,7 @@ mod tests {
     #[test]
     fn tell_reports_the_virtual_position_of_the_next_byte() {
         for n in [1, 2] {
-            let mut writer = BlockWriter::new(Vec::new(), level(6), threads(n));
+            let mut writer = BlockWriter::new(Vec::new(), level(6), threads(n)).unwrap();
             assert_eq!(writer.tell().unwrap(), 0);
             writer.write(&sample(BLOCK_SIZE + 10)).unwrap();
             let told = writer.tell().unwrap();
@@ -495,7 +512,7 @@ mod tests {
 
     #[test]
     fn forgetting_old_blocks_keeps_recent_positions() {
-        let mut writer = BlockWriter::new(Vec::new(), level(1), threads(1));
+        let mut writer = BlockWriter::new(Vec::new(), level(1), threads(1)).unwrap();
         writer.write(&sample(BLOCK_SIZE * 4)).unwrap();
         writer.forget_before(3);
         let last = LogicalPosition {
@@ -509,7 +526,7 @@ mod tests {
     #[test]
     fn level_zero_stores_blocks() {
         let data = sample(BLOCK_SIZE * 2);
-        let mut writer = BlockWriter::new(Vec::new(), level(0), threads(2));
+        let mut writer = BlockWriter::new(Vec::new(), level(0), threads(2)).unwrap();
         writer.write(&data).unwrap();
         writer.finish().unwrap();
         assert_eq!(decompress(writer.get_ref()), data);
@@ -529,7 +546,7 @@ mod tests {
     #[test]
     fn sink_errors_surface() {
         for n in [1, 2] {
-            let mut writer = BlockWriter::new(Broken, level(6), threads(n));
+            let mut writer = BlockWriter::new(Broken, level(6), threads(n)).unwrap();
             let result = writer
                 .write(&sample(BLOCK_SIZE * 8))
                 .and_then(|()| writer.finish().map(drop));

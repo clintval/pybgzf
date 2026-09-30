@@ -11,7 +11,7 @@ from typing import Final
 
 from pybgzf import _pybgzf
 
-ColumnsTuple = tuple[int, int, int | None, bool, str, int, str]
+ColumnsTuple = tuple[int, int, int | None, bool, str, int, _pybgzf.LineKind]
 
 _COMPRESSION_SUFFIXES: Final = (".gz", ".bgz", ".bgzf")
 
@@ -19,13 +19,13 @@ _COMPRESSION_SUFFIXES: Final = (".gz", ".bgz", ".bgzf")
 class LineFormat(Enum):
     """How a line's end is found, which tabix also records as the file format."""
 
-    GENERIC = "generic"
+    GENERIC = _pybgzf.LineKind.GENERIC
     """The end is read from the end column, or the line covers one base if there is none."""
 
-    SAM = "sam"
+    SAM = _pybgzf.LineKind.SAM
     """The end is computed from the CIGAR string."""
 
-    VCF = "vcf"
+    VCF = _pybgzf.LineKind.VCF
     """The end is computed from REF, `INFO/END`, `INFO/SVLEN`, and `FORMAT/LEN`."""
 
 
@@ -42,6 +42,8 @@ INFER: Final = Infer.INFER
 @dataclass(frozen=True, slots=True)
 class Columns:
     """Where each line keeps its reference name, start, and end, like `tabix -s -b -e -0 -c -S`.
+
+    Positions are read as base-10 integers, so, unlike in tabix, `010` is 10 and `0x10` is 0.
 
     Attributes:
         refname: The 1-based column holding the reference name.

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import codecs
 import errno
 import io
 import os
@@ -16,6 +17,7 @@ from pybgzf._columns import Columns
 from pybgzf._columns import columns_from_tuple
 
 _TEXT_BUFFER_SIZE = 1 << 20
+_MAX_POSITION = (1 << 63) - 1
 
 
 class ReadableBinary(Protocol):
@@ -36,11 +38,11 @@ class BgzfReader(io.RawIOBase):
 
     Args:
         src: A path to open, or a readable binary file-like object such as a pipe.
-        threads: The number of threads decompressing blocks; 1 decompresses in the calling
-            thread.
+        threads: The number of threads decompressing blocks, from 1 to 1024; 1 decompresses in
+            the calling thread.
 
     Raises:
-        ValueError: If `threads` is less than 1.
+        ValueError: If `threads` is not between 1 and 1024.
         OSError: If `src` cannot be opened.
     """
 
@@ -49,9 +51,11 @@ class BgzfReader(io.RawIOBase):
         if isinstance(src, (str, os.PathLike)):
             source: str | ReadableBinary = os.fspath(src)
             self._name: object = source
-        else:
+        elif callable(getattr(src, "read", None)):
             source = src
             self._name = getattr(src, "name", None)
+        else:
+            raise TypeError(f"expected a path or an object with a read method, not {src!r}")
         self._inner: _pybgzf.Reader = _pybgzf.Reader(source, threads=threads)
 
     @property
@@ -98,15 +102,26 @@ class BgzfReader(io.RawIOBase):
         """Move to a virtual offset from `tell()` or an index, and return it.
 
         Only `io.SEEK_SET` is supported, and only when the source can seek.
+
+        Raises:
+            ValueError: If the offset is in no block of the file and is not its end.
         """
         self._check_open()
         if whence != io.SEEK_SET:
             raise io.UnsupportedOperation("only seeking to a virtual offset is supported")
+        if offset < 0:
+            raise ValueError(f"negative seek position {offset}")
+        if offset >= 1 << 64:
+            raise ValueError(f"virtual offset {offset} is too large")
         return self._inner.seek(offset)
 
     @override
     def close(self) -> None:
-        """Stop any decompression threads and close the source if it was opened from a path."""
+        """Stop any decompression threads and close the source if it was opened from a path.
+
+        With more than one thread, a pipe or file-like source may be read from once more in the
+        background after this returns, if a read was already waiting for data.
+        """
         if self.closed:
             return
         inner: _pybgzf.Reader | None = getattr(self, "_inner", None)
@@ -121,7 +136,7 @@ class BgzfReader(io.RawIOBase):
             raise ValueError("I/O operation on closed file.")
 
 
-def open_reader(
+def reader(
     src: str | os.PathLike[str] | ReadableBinary,
     *,
     threads: int = 1,
@@ -133,28 +148,29 @@ def open_reader(
 
     The encoding defaults to UTF-8, and `errors` and `newline` work as in `io.TextIOWrapper`.
     """
+    encoding = codecs.lookup("utf-8" if encoding is None else encoding).name
     raw = BgzfReader(src, threads=threads)
-    buffered = io.BufferedReader(raw, buffer_size=_TEXT_BUFFER_SIZE)
-    return io.TextIOWrapper(
-        buffered,
-        encoding="utf-8" if encoding is None else encoding,
-        errors=errors,
-        newline=newline,
-    )
+    try:
+        buffered = io.BufferedReader(raw, buffer_size=_TEXT_BUFFER_SIZE)
+        return io.TextIOWrapper(buffered, encoding=encoding, errors=errors, newline=newline)
+    except BaseException:
+        raw.close()
+        raise
 
 
 class IndexedReader:
     """A BGZF file and its tabix or CSI index, for reading the lines in a region.
 
-    Lines are found with the columns, header character, and skipped lines recorded in the index,
-    and a query returns what `tabix path ref:start+1-end` prints, in the same order.
+    Lines are parsed with the columns and header character recorded in the index, and a query
+    returns what `tabix path ref:start+1-end` prints, in the same order.
 
     Args:
         path: The BGZF file.
         index_path: Its index; defaults to `path` plus `.csi` or, if there is none, `.tbi`, the
             order htslib looks in.
-        threads: The number of threads decompressing blocks; 1 decompresses in the calling
-            thread.
+        threads: The number of threads decompressing blocks, from 1 to 1024; 1 decompresses in
+            the calling thread and is usually fastest for many small queries, since more threads
+            restart their read-ahead at every seek.
 
     Raises:
         FileNotFoundError: If the file, or an index for it, cannot be found.
@@ -185,7 +201,11 @@ class IndexedReader:
 
     @property
     def refnames(self) -> list[str]:
-        """The reference names in the index, in the order they appear in the file."""
+        """The reference names in the index, in the order they appear in the file.
+
+        Raises:
+            ValueError: If a name is not UTF-8.
+        """
         return self._inner.refnames
 
     @property
@@ -205,10 +225,15 @@ class IndexedReader:
         An empty region, or a reference name not in the index, returns no lines.
 
         Raises:
-            ValueError: If `start` is negative or `end` is less than `start`, or a line in the
-                region cannot be parsed.
+            ValueError: If `start` is negative or `end` is less than `start`, or, once the lines
+                before it have been returned, a line in the region cannot be parsed or is not
+                UTF-8, naming its virtual offset.
         """
-        return self._inner.query(refname, start, end)
+        if start < 0 or end < start:
+            raise ValueError(
+                f"start must be at least 0 and end at least start, not {start} and {end}"
+            )
+        return self._inner.query(refname, min(start, _MAX_POSITION), min(end, _MAX_POSITION))
 
     def close(self) -> None:
         """Stop any decompression threads and close the file."""

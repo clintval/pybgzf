@@ -1,6 +1,6 @@
 [project]
 name = "pybgzf"
-version = "0.1.0"
+dynamic = ["version"]
 description = "Streaming BGZF compression with on-the-fly tabix and CSI indexing."
 authors = [{ name = "Clint Valentine", email = "valentine.clint@gmail.com" }]
 license = "MIT"
@@ -13,7 +13,6 @@ classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
     "Intended Audience :: Science/Research",
-    "License :: OSI Approved :: MIT License",
     "Natural Language :: English",
     "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
@@ -221,7 +220,7 @@ body = """
 [tool.git-cliff.git]
 conventional_commits = true
 commit_parsers = [
-    { message = "^.+!:*", group = "Breaking"},
+    { message = "^[a-z]+(\\(.+\\))?!:", group = "Breaking"},
     { message = "^security*", group = "Security"},
     { message = "^feat*", group = "Features"},
     { message = "^fix*", group = "Bug Fixes"},
@@ -230,7 +229,11 @@ commit_parsers = [
     { message = "^refactor*", group = "Refactor"},
     { message = "^style*", group = "Styling"},
     { message = "^test*", group = "Testing"},
+    { message = "^build*", group = "Build"},
+    { message = "^ci*", group = "Continuous Integration"},
+    { message = "^revert*", group = "Reverts"},
     { message = "^chore\\(release\\):*", skip = true},
+    { message = "^chore\\(deps\\)", skip = true},
     { message = "^chore*", group = "Miscellaneous Tasks"},
     { body = ".*security", group = "Security"}
 ]

@@ -2,7 +2,7 @@
 
 [![Build Status](https://github.com/clintval/pybgzf/actions/workflows/tests.yml/badge.svg?branch=main)](https://github.com/clintval/pybgzf/actions/workflows/tests.yml?query=branch%3Amain)
 [![Python Versions](https://img.shields.io/badge/python-3.11_|_3.12_|_3.13_|_3.14-blue)](https://github.com/clintval/pybgzf)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://github.com/clintval/pybgzf/blob/main/LICENSE)
 [![Language](https://img.shields.io/badge/language-rust-dea588.svg)](https://www.rust-lang.org/)
 
 Streaming BGZF compression with on-the-fly tabix and CSI indexing.
@@ -33,7 +33,7 @@ Write sorted BED lines as text and the index appears next to the file on close:
 >>> directory = Path(mkdtemp())
 >>> path = directory / "features.bed.gz"
 >>>
->>> with pybgzf.open(path, index=IndexFormat.TBI, columns=Columns.BED) as handle:
+>>> with pybgzf.writer(path, index=IndexFormat.TBI, columns=Columns.BED) as handle:
 ...     _ = handle.write("chr1\t100\t200\tgene-a\n")
 ...     _ = handle.write("chr1\t150\t300\tgene-b\n")
 ...     _ = handle.write("chr2\t10\t20\tgene-c\n")
@@ -61,7 +61,7 @@ True
 Read the BED file back on several threads, or query a region with 0-based, half-open coordinates:
 
 ```python
->>> with pybgzf.open_reader(path, threads=4) as handle:
+>>> with pybgzf.reader(path, threads=4) as handle:
 ...     handle.readline()
 'chr1\t100\t200\tgene-a\n'
 
@@ -85,13 +85,13 @@ Writing 200 MB of BED lines at level 6, then reading them back, on an Apple M3 M
 | `bgzip -@4` then `tabix`             |    1.31 |   153 |
 | `bgzip -@16` then `tabix`            |    0.90 |   222 |
 | lines from `gzip.open` (stdlib)      |    0.66 |   303 |
-| lines from `open_reader`, 1 thread   |    0.44 |   456 |
-| lines from `open_reader`, 4 threads  |    0.30 |   671 |
+| lines from `reader`, 1 thread   |    0.44 |   456 |
+| lines from `reader`, 4 threads  |    0.30 |   671 |
 | bytes from `BgzfReader`, 16 threads  |    0.03 |  7608 |
 | `bgzip -d -@16`                      |    0.03 |  7652 |
 
 ## Development and Testing
 
-See the [contributing guide](./CONTRIBUTING.md) for more information.
+See the [contributing guide](https://github.com/clintval/pybgzf/blob/main/CONTRIBUTING.md) for more information.
 
-The multithreaded, position-tracking writer is adapted from [fgumi](https://github.com/fulcrumgenomics/fgumi), and indexing follows [htslib](https://github.com/samtools/htslib); see [NOTICE](NOTICE).
+The multithreaded, position-tracking writer is adapted from [fgumi](https://github.com/fulcrumgenomics/fgumi), and indexing follows [htslib](https://github.com/samtools/htslib); see [NOTICE](https://github.com/clintval/pybgzf/blob/main/NOTICE).

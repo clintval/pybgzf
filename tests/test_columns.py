@@ -1,9 +1,12 @@
+import pickle
 from collections.abc import Callable
 from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
 from pybgzf import Columns
+from pybgzf import IndexFormat
+from pybgzf import Infer
 from pybgzf import LineFormat
 
 
@@ -81,3 +84,14 @@ def test_invalid_columns(make: Callable[[], Columns]) -> None:
 def test_sniff_two_columns_as_bed2() -> None:
     assert Columns.sniff(["chr1\t5"]) == Columns.BED2
     assert Columns.BED2 == Columns(1, 2, None, True, "#")
+
+
+def test_enum_values_are_opaque() -> None:
+    for member in [*LineFormat, *IndexFormat, *Infer]:
+        assert not isinstance(member.value, str)
+        assert type(member)(member.value) is member
+
+
+def test_enum_members_and_columns_pickle() -> None:
+    for value in [*LineFormat, *IndexFormat, *Infer, Columns.VCF, Columns.SAM]:
+        assert pickle.loads(pickle.dumps(value)) == value

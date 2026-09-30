@@ -18,6 +18,8 @@ use crate::sniff::Sniffer;
 const TABIX_MIN_SHIFT: u32 = 14;
 const TABIX_DEPTH: u32 = 5;
 const TABIX_MAX_SHIFT: u32 = 31;
+const NO_COLUMNS: &str =
+    "could not infer columns because no data lines were written; pass columns explicitly";
 
 /// An error from writing: either I/O failed or the data cannot be indexed.
 #[derive(Debug)]
@@ -59,6 +61,7 @@ struct Record {
 struct Indexer {
     format: IndexFormat,
     path: PathBuf,
+    file: Option<File>,
     columns: Option<Columns>,
     sniffer: Sniffer,
     partial: Vec<u8>,
@@ -86,20 +89,34 @@ fn longest(line: &[u8], prefix: &[u8], key: &[u8], skip_padding: bool) -> Option
         value = &value[padding..];
     }
     let digits = value.iter().take_while(|b| b.is_ascii_digit()).count();
-    std::str::from_utf8(&value[..digits]).ok()?.parse().ok()
+    if digits == 0 {
+        return None;
+    }
+    Some(value[..digits].iter().fold(0_i64, |total, digit| {
+        total
+            .saturating_mul(10)
+            .saturating_add(i64::from(digit - b'0'))
+    }))
 }
 
-fn csi_bins(mut min_shift: u32, longest_reference: i64) -> (u32, u32) {
+fn csi_bins(mut min_shift: u32, longest_reference: i64) -> std::result::Result<(u32, u32), String> {
     const MAX_DEPTH: u32 = 9;
+    const MAX_SHIFT: u32 = 62;
     if longest_reference <= 0 {
         let depth = match min_shift {
             0..10 => MAX_DEPTH,
             10..25 => MAX_DEPTH - (min_shift - 10) / 3,
             _ => 4,
         };
-        return (min_shift, depth);
+        return Ok((min_shift, depth));
     }
-    let needed = longest_reference + 256;
+    let needed = longest_reference.saturating_add(256);
+    if needed > 1_i64 << MAX_SHIFT {
+        return Err(format!(
+            "a reference of length {longest_reference} in the header is too long for a CSI index, which holds up to {}",
+            (1_i64 << MAX_SHIFT) - 256
+        ));
+    }
     let mut depth = (TABIX_MAX_SHIFT + 2).saturating_sub(min_shift) / 3;
     if needed <= max_position(min_shift, MAX_DEPTH) {
         while needed > max_position(min_shift, depth) {
@@ -111,7 +128,7 @@ fn csi_bins(mut min_shift: u32, longest_reference: i64) -> (u32, u32) {
             min_shift += 1;
         }
     }
-    (min_shift, depth)
+    Ok((min_shift, depth))
 }
 
 fn trim_line(line: &[u8]) -> &[u8] {
@@ -119,10 +136,18 @@ fn trim_line(line: &[u8]) -> &[u8] {
 }
 
 impl Indexer {
-    fn new(options: IndexOptions) -> Self {
-        Self {
+    fn create(options: IndexOptions) -> io::Result<Self> {
+        let file = File::create(&options.path).map_err(|error| {
+            let path = options.path.display();
+            io::Error::new(
+                error.kind(),
+                format!("cannot create the index {path}: {error}"),
+            )
+        })?;
+        Ok(Self {
             format: options.format,
             path: options.path,
+            file: Some(file),
             columns: options.columns,
             sniffer: if options.bed_only {
                 Sniffer::bed()
@@ -143,6 +168,14 @@ impl Indexer {
             pending: VecDeque::new(),
             builder: None,
             failure: None,
+        })
+    }
+
+    fn remove_file(&mut self) -> io::Result<()> {
+        self.file.take();
+        match fs::remove_file(&self.path) {
+            Err(error) if error.kind() != io::ErrorKind::NotFound => Err(error),
+            _ => Ok(()),
         }
     }
 
@@ -155,13 +188,13 @@ impl Indexer {
         }
     }
 
-    fn decide_bins(&self, columns: &Columns) -> (u32, u32) {
+    fn decide_bins(&self, columns: &Columns) -> std::result::Result<(u32, u32), String> {
         match self.format {
-            IndexFormat::Tabix => (TABIX_MIN_SHIFT, TABIX_DEPTH),
+            IndexFormat::Tabix => Ok((TABIX_MIN_SHIFT, TABIX_DEPTH)),
             IndexFormat::Csi {
                 min_shift,
                 depth: Some(depth),
-            } => (min_shift, depth),
+            } => Ok((min_shift, depth)),
             IndexFormat::Csi {
                 min_shift,
                 depth: None,
@@ -209,7 +242,12 @@ impl Indexer {
         let interval = columns
             .parse(line)
             .map_err(|e| format!("line {number}: {e}"))?;
-        let (min_shift, depth) = self.bins.unwrap_or_else(|| self.decide_bins(&columns));
+        let (min_shift, depth) = match self.bins {
+            Some(bins) => bins,
+            None => self
+                .decide_bins(&columns)
+                .map_err(|e| format!("line {number}: {e}"))?,
+        };
         let name = interval.name;
         let limit = max_position(min_shift, depth);
         if interval.beg > limit || interval.end > limit {
@@ -240,17 +278,22 @@ impl Indexer {
             tid
         } else if self.names.contains(name) {
             return Err(format!(
-                "line {number}: records for {:?} are not contiguous; each reference must appear in one block",
+                "line {number}: records for {:?} are not contiguous; the lines of each reference must form one contiguous run",
                 String::from_utf8_lossy(name),
+            ));
+        } else if memchr(0, name).is_some() {
+            return Err(format!(
+                "line {number}: the reference name {:?} contains a NUL byte",
+                String::from_utf8_lossy(name)
             ));
         } else {
             self.names.insert_full(name.to_vec()).0
         };
         if interval.end < interval.beg {
+            let start = interval.beg + i64::from(!columns.zero_based);
             return Err(format!(
-                "line {number}: the end {} is before the start {}",
-                interval.end,
-                interval.beg + 1
+                "line {number}: the end {} is before the start {start}",
+                interval.end
             ));
         }
         self.bins = Some((min_shift, depth));
@@ -289,17 +332,18 @@ impl Indexer {
             self.pending.pop_front();
         }
         let needed = match (&self.builder, self.pending.front()) {
-            (_, Some(record)) => record.end_position.block,
-            (None, None) => self.first_offset.block,
+            (None, _) => self.first_offset.block,
+            (Some(_), Some(record)) => record.end_position.block,
             (Some(_), None) => blocks.position().block,
         };
         blocks.forget_before(needed);
     }
 
     fn write_index(&mut self, final_offset: u64, first_offset: u64) -> Result<()> {
-        let columns = self.columns.take().ok_or_else(|| {
-            Error::Invalid("could not infer columns because no data lines were written; pass columns explicitly".into())
-        })?;
+        let columns = self
+            .columns
+            .take()
+            .ok_or_else(|| Error::Invalid(NO_COLUMNS.into()))?;
         let (min_shift, depth) = self.bins.unwrap_or_else(|| self.empty_bins());
         let builder = self
             .builder
@@ -313,7 +357,11 @@ impl Indexer {
             meta_char: columns.meta_char,
             skip_lines: columns.skip_lines as u32,
         };
-        let file = BufWriter::new(File::create(&self.path)?);
+        let file = self
+            .file
+            .take()
+            .ok_or_else(|| io::Error::other("the index was already written"))?;
+        let file = BufWriter::new(file);
         let mut file = match self.format {
             IndexFormat::Tabix => index::write_tabix(
                 file,
@@ -329,29 +377,51 @@ impl Indexer {
     }
 }
 
+/// Checks a compression level, which must be between 0 and 12.
+pub fn check_level(level: i64) -> Result<CompressionLevel> {
+    u8::try_from(level)
+        .ok()
+        .and_then(|level| CompressionLevel::new(level).ok())
+        .ok_or_else(|| Error::Invalid(format!("level must be between 0 and 12, not {level}")))
+}
+
+/// Checks the CSI bin parameters and returns the index format they describe.
+pub fn csi_format(min_shift: i64, depth: Option<i64>) -> Result<IndexFormat> {
+    let min_shift = u32::try_from(min_shift)
+        .ok()
+        .filter(|shift| (1..=TABIX_MAX_SHIFT).contains(shift))
+        .ok_or_else(|| {
+            Error::Invalid(format!(
+                "csi_min_shift must be between 1 and {TABIX_MAX_SHIFT}, not {min_shift}"
+            ))
+        })?;
+    let depth = depth
+        .map(|depth| {
+            u32::try_from(depth)
+                .ok()
+                .filter(|depth| (1..=9).contains(depth))
+                .ok_or_else(|| {
+                    Error::Invalid(format!("csi_depth must be between 1 and 9, not {depth}"))
+                })
+        })
+        .transpose()?;
+    Ok(IndexFormat::Csi { min_shift, depth })
+}
+
 /// Checks writer options before anything is created.
 pub fn check_options(
-    level: u8,
-    threads: usize,
+    level: i64,
+    threads: i64,
     index: Option<&IndexOptions>,
 ) -> Result<(CompressionLevel, NonZero<usize>)> {
-    let compression = CompressionLevel::new(level)
-        .map_err(|_| Error::Invalid(format!("level must be between 0 and 12, not {level}")))?;
-    let threads =
-        NonZero::new(threads).ok_or_else(|| Error::Invalid("threads must be at least 1".into()))?;
+    let compression = check_level(level)?;
+    let threads = crate::check_threads(threads).map_err(Error::Invalid)?;
     if let Some(options) = index {
         if let Some(columns) = &options.columns {
             columns.validate().map_err(Error::Invalid)?;
         }
         if let IndexFormat::Csi { min_shift, depth } = options.format {
-            if !(1..=TABIX_MAX_SHIFT).contains(&min_shift) {
-                return Err(Error::Invalid(format!(
-                    "csi_min_shift must be between 1 and {TABIX_MAX_SHIFT}, not {min_shift}"
-                )));
-            }
-            if depth.is_some_and(|depth| !(1..=9).contains(&depth)) {
-                return Err(Error::Invalid("csi_depth must be between 1 and 9".into()));
-            }
+            csi_format(i64::from(min_shift), depth.map(i64::from))?;
         }
     }
     Ok((compression, threads))
@@ -369,10 +439,10 @@ pub struct Writer<W: Write> {
 impl<W: Write> Writer<W> {
     /// Creates a writer compressing at `level` (0-12) on `threads` threads.
     pub fn new(sink: W, level: u8, threads: usize, index: Option<IndexOptions>) -> Result<Self> {
-        let (level, threads) = check_options(level, threads, index.as_ref())?;
+        let (level, threads) = check_options(i64::from(level), threads as i64, index.as_ref())?;
         Ok(Self {
-            blocks: BlockWriter::new(sink, level, threads),
-            indexer: index.map(Indexer::new),
+            blocks: BlockWriter::new(sink, level, threads)?,
+            indexer: index.map(Indexer::create).transpose()?,
             final_columns: None,
             io_failure: None,
             finished: false,
@@ -392,17 +462,17 @@ impl<W: Write> Writer<W> {
         self.blocks.buffered() + len >= BLOCK_SIZE
     }
 
-    fn check(&self) -> Result<()> {
+    fn check_stream(&self) -> Result<()> {
         if self.finished {
             return Err(Error::Io(io::Error::other(
                 "I/O operation on a closed writer",
             )));
         }
-        if let Some(message) = &self.io_failure {
-            return Err(Error::Io(io::Error::other(format!(
-                "the writer failed earlier: {message}"
-            ))));
-        }
+        self.check_io()
+    }
+
+    fn check(&self) -> Result<()> {
+        self.check_stream()?;
         if let Some(message) = self
             .indexer
             .as_ref()
@@ -437,9 +507,12 @@ impl<W: Write> Writer<W> {
 
     fn write_unchecked(&mut self, data: &[u8]) -> Result<()> {
         let Some(indexer) = &mut self.indexer else {
-            return Ok(self.blocks.write(data)?);
+            self.blocks.write(data)?;
+            self.blocks.forget_before(u64::MAX);
+            return Ok(());
         };
         let mut rest = data;
+        let mut block = self.blocks.position().block;
         while let Some(newline) = memchr(b'\n', rest) {
             let mut line = std::mem::take(&mut indexer.partial);
             let classified = if line.is_empty() {
@@ -452,8 +525,13 @@ impl<W: Write> Writer<W> {
             indexer.partial = line;
             let record = classified.map_err(Error::Invalid)?;
             self.blocks.write(&rest[..=newline])?;
-            indexer.commit(record, self.blocks.position());
+            let position = self.blocks.position();
+            indexer.commit(record, position);
             rest = &rest[newline + 1..];
+            if position.block != block {
+                block = position.block;
+                indexer.resolve(&mut self.blocks);
+            }
         }
         self.blocks.write(rest)?;
         indexer.partial.extend_from_slice(rest);
@@ -463,7 +541,7 @@ impl<W: Write> Writer<W> {
 
     /// Ends the current block and flushes everything written so far to the sink.
     pub fn flush(&mut self) -> Result<()> {
-        self.check()?;
+        self.check_stream()?;
         let result = self.blocks.flush().map_err(Error::Io);
         if let Some(indexer) = &mut self.indexer {
             indexer.resolve(&mut self.blocks);
@@ -473,11 +551,7 @@ impl<W: Write> Writer<W> {
 
     /// Returns the virtual position of the next byte to be written.
     pub fn tell(&mut self) -> Result<u64> {
-        if self.finished {
-            return Err(Error::Io(io::Error::other(
-                "I/O operation on a closed writer",
-            )));
-        }
+        self.check_stream()?;
         let result = self.blocks.tell().map_err(Error::Io);
         self.guard(result)
     }
@@ -489,23 +563,35 @@ impl<W: Write> Writer<W> {
 
     /// Writes the end-of-file marker and then the index, if one was requested.
     ///
-    /// An indexing error that was already reported by [`Writer::write`] is not reported again,
-    /// but no index is written and any existing file at the index path is removed.
+    /// After an indexing error, the data is written without the end-of-file marker, so that
+    /// readers see it as truncated. After any error, the index file, which was created empty
+    /// with the writer, is removed. An indexing error already reported by [`Writer::write`] is
+    /// not reported again.
     pub fn finish(&mut self) -> Result<()> {
         if self.finished {
             return Ok(());
         }
         self.finished = true;
-        if let Some(message) = &self.io_failure {
-            return Err(Error::Io(io::Error::other(format!(
-                "the writer failed earlier: {message}"
-            ))));
-        }
         let Some(mut indexer) = self.indexer.take() else {
+            self.check_io()?;
             return self.blocks.finish().map(drop).map_err(Error::Io);
         };
         let reported = indexer.failure.is_some();
-        if !reported && !indexer.partial.is_empty() {
+        match self.finish_indexed(&mut indexer) {
+            Ok(()) => Ok(()),
+            Err(error) => {
+                indexer.remove_file()?;
+                match error {
+                    Error::Invalid(_) if reported => Ok(()),
+                    error => Err(error),
+                }
+            }
+        }
+    }
+
+    fn finish_indexed(&mut self, indexer: &mut Indexer) -> Result<()> {
+        self.check_io()?;
+        if indexer.failure.is_none() && !indexer.partial.is_empty() {
             let line = std::mem::take(&mut indexer.partial);
             match indexer.classify(trim_line(&line)) {
                 Ok(record) => indexer.commit(record, self.blocks.position()),
@@ -513,29 +599,28 @@ impl<W: Write> Writer<W> {
             }
         }
         self.final_columns.clone_from(&indexer.columns);
-        let final_offset = self.blocks.finish().map_err(Error::Io)?;
-        let outcome = match indexer.failure.take() {
-            Some(message) => Err(Error::Invalid(message)),
-            None => {
-                indexer.resolve(&mut self.blocks);
-                let first_offset = self
-                    .blocks
-                    .resolve(indexer.first_offset)
-                    .unwrap_or(final_offset);
-                indexer.write_index(final_offset, first_offset)
-            }
-        };
-        match outcome {
-            Ok(()) => Ok(()),
-            Err(error) => {
-                let path = std::mem::take(&mut indexer.path);
-                if let Err(e) = fs::remove_file(&path)
-                    && e.kind() != io::ErrorKind::NotFound
-                {
-                    return Err(Error::Io(e));
-                }
-                if reported { Ok(()) } else { Err(error) }
-            }
+        if indexer.failure.is_none() && indexer.columns.is_none() {
+            indexer.failure = Some(NO_COLUMNS.into());
+        }
+        if let Some(message) = indexer.failure.take() {
+            self.blocks.abandon()?;
+            return Err(Error::Invalid(message));
+        }
+        let final_offset = self.blocks.finish()?;
+        indexer.resolve(&mut self.blocks);
+        let first_offset = self
+            .blocks
+            .resolve(indexer.first_offset)
+            .unwrap_or(final_offset);
+        indexer.write_index(final_offset, first_offset)
+    }
+
+    fn check_io(&self) -> Result<()> {
+        match &self.io_failure {
+            Some(message) => Err(Error::Io(io::Error::other(format!(
+                "the writer failed earlier: {message}"
+            )))),
+            None => Ok(()),
         }
     }
 
@@ -704,11 +789,48 @@ mod tests {
 
     #[test]
     fn csi_bins_follow_htslib() {
-        assert_eq!(csi_bins(14, 0), (14, 8));
-        assert_eq!(csi_bins(10, 0), (10, 9));
-        assert_eq!(csi_bins(14, 248_956_422), (14, 6));
-        assert_eq!(csi_bins(14, 1 << 33), (14, 7));
-        assert_eq!(csi_bins(4, 1 << 40), (14, 9));
+        assert_eq!(csi_bins(14, 0), Ok((14, 8)));
+        assert_eq!(csi_bins(10, 0), Ok((10, 9)));
+        assert_eq!(csi_bins(14, 248_956_422), Ok((14, 6)));
+        assert_eq!(csi_bins(14, 1 << 33), Ok((14, 7)));
+        assert_eq!(csi_bins(4, 1 << 40), Ok((14, 9)));
+        assert_eq!(csi_bins(14, (1 << 62) - 256), Ok((35, 9)));
+        assert!(csi_bins(14, (1 << 62) - 255).is_err());
+        assert!(csi_bins(14, i64::MAX).is_err());
+    }
+
+    #[test]
+    fn a_first_record_ending_blocks_after_the_header_is_indexed() {
+        let dir = tempfile::tempdir().unwrap();
+        let options = options(&dir, IndexFormat::Tabix, Some(Columns::bed()));
+        let mut writer = Writer::new(Vec::new(), 1, 1, Some(options)).unwrap();
+        writer.write(b"#header\n").unwrap();
+        let mut line = b"chr1\t1\t2\t".to_vec();
+        line.resize(3 * BLOCK_SIZE, b'x');
+        line.push(b'\n');
+        writer.write(&line).unwrap();
+        writer.write(b"chr1\t5\t6\n").unwrap();
+        writer.finish().unwrap();
+        assert!(dir.path().join("out.bed.gz.idx").exists());
+    }
+
+    #[test]
+    fn memory_stays_bounded_within_one_large_write() {
+        let data: Vec<u8> = (0..200_000)
+            .flat_map(|i| format!("chr1\t{i}\t{}\n", i + 5).into_bytes())
+            .collect();
+        for threads in [1, 3] {
+            let dir = tempfile::tempdir().unwrap();
+            let options = options(&dir, IndexFormat::Tabix, Some(Columns::bed()));
+            let mut writer = Writer::new(Vec::new(), 1, threads, Some(options)).unwrap();
+            writer.write(&data).unwrap();
+            let pending = writer.indexer.as_ref().unwrap().pending.len();
+            assert!(pending < 50_000, "threads={threads} pending={pending}");
+            writer.finish().unwrap();
+            let mut writer = Writer::new(Vec::new(), 1, threads, None).unwrap();
+            writer.write(&data).unwrap();
+            assert!(writer.blocks.remembered_blocks() <= 1, "threads={threads}");
+        }
     }
 
     #[test]
@@ -729,6 +851,10 @@ mod tests {
         assert_eq!(
             longest(b"##INFO=<ID=x>", b"##contig", b"length", true),
             None
+        );
+        assert_eq!(
+            longest(b"@SQ\tLN:99999999999999999999", b"@SQ", b"\tLN:", false),
+            Some(i64::MAX)
         );
     }
 }

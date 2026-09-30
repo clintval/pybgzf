@@ -38,6 +38,16 @@ jobs:
           reference: "main"
           tag: "${{ github.ref_name }}"
 
+      - name: Check that the tag matches the package version
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          version=$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["package"]["version"])')
+          if [ "$TAG" != "$version" ]; then
+            echo "::error::The tag $TAG does not match the version $version in Cargo.toml"
+            exit 1
+          fi
+
   tests:
     name: tests
     needs: on-main-branch-check
