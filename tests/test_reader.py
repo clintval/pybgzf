@@ -427,3 +427,55 @@ def test_reads_files_without_an_end_of_file_marker(data_dir: Path, threads: int)
             chunks.append(reader.read(65536))
     assert b"".join(chunks) == expected
     assert chunks[-1] == b""
+
+
+def block_starts(data: bytes) -> list[int]:
+    starts: list[int] = []
+    at = 0
+    while at < len(data):
+        starts.append(at)
+        at += int.from_bytes(data[at + 16 : at + 18], "little") + 1
+    return starts
+
+
+@pytest.mark.parametrize("threads", [1, 3])
+@pytest.mark.parametrize("cut", [5, 20], ids=["in a header", "in a body"])
+def test_truncation_inside_a_block_raises(data_dir: Path, threads: int, cut: int) -> None:
+    compressed = bed_path(data_dir, IndexFormat.TBI).read_bytes()
+    start = block_starts(compressed)[3]
+    with (
+        pytest.raises(OSError, match="truncated|unexpected end of file|failed to fill"),
+        BgzfReader(io.BytesIO(compressed[: start + cut]), threads=threads) as reader,
+    ):
+        reader.readall()
+
+
+@pytest.mark.parametrize("threads", [1, 3])
+def test_seeking_to_the_end(data_dir: Path, threads: int) -> None:
+    path = bed_path(data_dir, IndexFormat.TBI)
+    size = path.stat().st_size
+    with BgzfReader(path, threads=threads) as reader:
+        first = reader.readline()
+        reader.readall()
+        end = reader.tell()
+        for position in (end, (size - 28) << 16, end):
+            reader.seek(0)
+            reader.readline()
+            assert reader.seek(position) == position
+            assert reader.tell() == position
+            assert reader.readline() == b""
+        reader.seek(0)
+        assert reader.readline() == first
+
+
+@pytest.mark.parametrize("threads", [1, 3])
+def test_seeking_outside_the_file_raises(data_dir: Path, threads: int) -> None:
+    path = bed_path(data_dir, IndexFormat.TBI)
+    size = path.stat().st_size
+    with BgzfReader(path, threads=threads) as reader:
+        first = reader.readline()
+        for position in (65535, (size + 100) << 16, 2**64 - 1, 2**64, -1):
+            with pytest.raises(ValueError, match="not in this file|negative|too large"):
+                reader.seek(position)
+        reader.seek(0)
+        assert reader.readline() == first

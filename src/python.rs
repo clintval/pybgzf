@@ -502,11 +502,13 @@ impl Reader {
     }
 
     /// Moves to a virtual position.
-    fn seek(&mut self, py: Python<'_>, position: i64) -> PyResult<u64> {
-        let position = u64::try_from(position)
-            .map_err(|_| PyValueError::new_err(format!("negative seek position {position}")))?;
+    fn seek(&mut self, py: Python<'_>, position: u64) -> PyResult<u64> {
         let inner = self.inner()?;
-        py.detach(|| inner.seek(position)).map_err(io_to_python)?;
+        py.detach(|| inner.seek(position))
+            .map_err(|error| match error.kind() {
+                io::ErrorKind::InvalidInput => PyValueError::new_err(error.to_string()),
+                _ => io_to_python(error),
+            })?;
         Ok(inner.virtual_position())
     }
 

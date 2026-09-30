@@ -1,10 +1,12 @@
 //! Reading BGZF sequentially or by region through a tabix or CSI index.
 
 use std::fs::File;
-use std::io::{self, BufRead, BufReader, Read, Seek};
+use std::io::{self, BufRead, BufReader, Read, Seek, SeekFrom};
 use std::num::NonZero;
 use std::panic::{self, AssertUnwindSafe};
 use std::path::Path;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use indexmap::IndexSet;
 use noodles_bgzf::VirtualPosition;
@@ -25,10 +27,33 @@ const FILE_BUFFER: usize = 128 * 1024;
 /// without an end-of-file marker.
 const SERIAL_READ_LIMIT: usize = u16::MAX as usize;
 
+/// A source that counts the compressed bytes read from it, so that bytes after the last complete
+/// block, such as a truncated block header, are noticed.
+struct Tracked<R> {
+    inner: R,
+    offset: Arc<AtomicU64>,
+}
+
+impl<R: Read> Read for Tracked<R> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        let n = self.inner.read(buf)?;
+        self.offset.fetch_add(n as u64, Ordering::Relaxed);
+        Ok(n)
+    }
+}
+
+impl<R: Seek> Seek for Tracked<R> {
+    fn seek(&mut self, position: SeekFrom) -> io::Result<u64> {
+        let offset = self.inner.seek(position)?;
+        self.offset.store(offset, Ordering::Relaxed);
+        Ok(offset)
+    }
+}
+
 enum Inner<R: Read + Send + 'static> {
-    Serial(SerialReader<R>),
-    Parallel(MultithreadedReader<R>),
-    Exhausted { source: R, position: u64 },
+    Serial(SerialReader<Tracked<R>>),
+    Parallel(MultithreadedReader<Tracked<R>>),
+    Exhausted { source: Tracked<R>, position: u64 },
     Failed { position: u64 },
 }
 
@@ -36,6 +61,7 @@ enum Inner<R: Read + Send + 'static> {
 pub struct BgzfReader<R: Read + Seek + Send + 'static> {
     inner: Inner<R>,
     threads: NonZero<usize>,
+    offset: Arc<AtomicU64>,
 }
 
 fn parallel<R: Read + Send + 'static>(
@@ -52,6 +78,13 @@ fn failed_earlier() -> io::Error {
     io::Error::other("the reader failed earlier")
 }
 
+fn not_in_file(position: u64) -> io::Error {
+    io::Error::new(
+        io::ErrorKind::InvalidInput,
+        format!("virtual offset {position} is not in this file"),
+    )
+}
+
 impl BgzfReader<BufReader<File>> {
     /// Opens a BGZF file.
     pub fn from_path<P: AsRef<Path>>(path: P, threads: NonZero<usize>) -> io::Result<Self> {
@@ -63,12 +96,27 @@ impl BgzfReader<BufReader<File>> {
 impl<R: Read + Seek + Send + 'static> BgzfReader<R> {
     /// Reads BGZF from `source`, decompressing on `threads` worker threads when more than one.
     pub fn new(source: R, threads: NonZero<usize>) -> io::Result<Self> {
-        let inner = if threads.get() == 1 {
+        let offset = Arc::new(AtomicU64::new(0));
+        let source = Tracked {
+            inner: source,
+            offset: Arc::clone(&offset),
+        };
+        let mut reader = Self {
+            inner: Inner::Failed { position: 0 },
+            threads,
+            offset,
+        };
+        reader.start(source)?;
+        Ok(reader)
+    }
+
+    fn start(&mut self, source: Tracked<R>) -> io::Result<()> {
+        self.inner = if self.threads.get() == 1 {
             Inner::Serial(SerialReader::new(source))
         } else {
-            Inner::Parallel(parallel(threads, source)?)
+            Inner::Parallel(parallel(self.threads, source)?)
         };
-        Ok(Self { inner, threads })
+        Ok(())
     }
 
     /// Returns the virtual position of the next byte to be read.
@@ -80,20 +128,63 @@ impl<R: Read + Seek + Send + 'static> BgzfReader<R> {
         }
     }
 
-    /// Moves to a virtual position, which must be the start of a line or record for the reads
-    /// that follow to make sense.
-    pub fn seek(&mut self, position: u64) -> io::Result<()> {
-        if let Inner::Exhausted { .. } = self.inner {
-            let stopped = std::mem::replace(&mut self.inner, Inner::Failed { position: 0 });
-            if let Inner::Exhausted { source, .. } = stopped {
-                self.inner = Inner::Parallel(parallel(self.threads, source)?);
-            }
+    fn compressed_position(&self) -> u64 {
+        match &self.inner {
+            Inner::Serial(reader) => reader.position(),
+            Inner::Parallel(reader) => reader.position(),
+            Inner::Exhausted { position, .. } | Inner::Failed { position } => position >> 16,
         }
-        let position = VirtualPosition::from(position);
+    }
+
+    /// Moves to a virtual position, which must be the start of a line or record for the reads
+    /// that follow to make sense, or the end of the file.
+    ///
+    /// Errors with [`io::ErrorKind::InvalidInput`] if the position is in no block of the file.
+    pub fn seek(&mut self, position: u64) -> io::Result<()> {
+        if let Inner::Exhausted { .. } = self.inner
+            && let Inner::Exhausted { source, .. } =
+                std::mem::replace(&mut self.inner, Inner::Failed { position: 0 })
+        {
+            self.start(source)?;
+        }
+        let target = VirtualPosition::from(position);
+        let (block, offset) = target.into();
         match &mut self.inner {
-            Inner::Serial(reader) => reader.seek(position).map(drop),
-            Inner::Parallel(reader) => reader.seek_to_virtual_position(position).map(drop),
-            Inner::Exhausted { .. } | Inner::Failed { .. } => Err(failed_earlier()),
+            Inner::Serial(reader) => reader.seek(target).map(drop)?,
+            Inner::Parallel(reader) => reader.seek_to_virtual_position(target).map(drop)?,
+            Inner::Exhausted { .. } | Inner::Failed { .. } => return Err(failed_earlier()),
+        }
+        if self.compressed_position() == block {
+            let mut source = self.stop()?;
+            let end = source.seek(SeekFrom::End(0))?;
+            let at_end = block == end && offset == 0;
+            let position = if at_end { position } else { end << 16 };
+            self.inner = Inner::Exhausted { source, position };
+            return if at_end {
+                Ok(())
+            } else {
+                Err(not_in_file(position))
+            };
+        }
+        if self.virtual_position() == position {
+            return Ok(());
+        }
+        if offset == 0 && self.fill_buf()?.is_empty() {
+            let source = self.stop()?;
+            self.inner = Inner::Exhausted { source, position };
+            return Ok(());
+        }
+        Err(not_in_file(position))
+    }
+
+    /// Stops any worker threads and returns the source, reporting any error they met.
+    fn stop(&mut self) -> io::Result<Tracked<R>> {
+        let position = self.virtual_position();
+        match std::mem::replace(&mut self.inner, Inner::Failed { position }) {
+            Inner::Serial(reader) => Ok(reader.into_inner()),
+            Inner::Parallel(mut reader) => reader.finish(),
+            Inner::Exhausted { source, .. } => Ok(source),
+            Inner::Failed { .. } => Err(failed_earlier()),
         }
     }
 
@@ -121,26 +212,34 @@ impl<R: Read + Seek + Send + 'static> BgzfReader<R> {
     }
 
     /// Stops any worker threads and returns the source.
-    pub fn finish(self) -> io::Result<R> {
-        match self.inner {
-            Inner::Serial(reader) => Ok(reader.into_inner()),
-            Inner::Parallel(mut reader) => reader.finish(),
-            Inner::Exhausted { source, .. } => Ok(source),
-            Inner::Failed { .. } => Err(failed_earlier()),
-        }
+    pub fn finish(mut self) -> io::Result<R> {
+        self.stop().map(|source| source.inner)
     }
 
-    /// Stops the worker threads at the end of the stream, which reports any error the thread
-    /// reading compressed blocks met, such as a truncated or corrupt block.
+    /// Checks at the end of the stream that no bytes follow the last complete block, then, when
+    /// reading on threads, stops them, which reports any error they met, such as a corrupt block.
     fn exhaust(&mut self) -> io::Result<()> {
-        let position = self.virtual_position();
-        if let Inner::Parallel(mut reader) =
-            std::mem::replace(&mut self.inner, Inner::Failed { position })
-        {
-            self.inner = Inner::Exhausted {
-                source: reader.finish()?,
-                position,
-            };
+        let consumed = self.compressed_position();
+        let read = self.offset.load(Ordering::Relaxed);
+        if read > consumed {
+            let position = self.virtual_position();
+            let parallel = matches!(self.inner, Inner::Parallel(_));
+            if parallel {
+                self.stop()?;
+            }
+            self.inner = Inner::Failed { position };
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                format!(
+                    "the BGZF file is truncated: {} bytes follow the last complete block",
+                    read - consumed
+                ),
+            ));
+        }
+        if let Inner::Parallel(_) = self.inner {
+            let position = self.virtual_position();
+            let source = self.stop()?;
+            self.inner = Inner::Exhausted { source, position };
         }
         Ok(())
     }
@@ -150,7 +249,12 @@ impl<R: Read + Seek + Send + 'static> Read for BgzfReader<R> {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         if let Inner::Serial(reader) = &mut self.inner {
             let n = buf.len().min(SERIAL_READ_LIMIT);
-            return reader.read(&mut buf[..n]);
+            let n = reader.read(&mut buf[..n])?;
+            if n > 0 || buf.is_empty() {
+                return Ok(n);
+            }
+            self.exhaust()?;
+            return Ok(0);
         }
         let data = self.fill_buf()?;
         let n = data.len().min(buf.len());
@@ -162,9 +266,13 @@ impl<R: Read + Seek + Send + 'static> Read for BgzfReader<R> {
 
 impl<R: Read + Seek + Send + 'static> BufRead for BgzfReader<R> {
     fn fill_buf(&mut self) -> io::Result<&[u8]> {
-        if let Inner::Parallel(reader) = &mut self.inner
-            && reader.fill_buf()?.is_empty()
-        {
+        let empty = match &mut self.inner {
+            Inner::Serial(reader) => reader.fill_buf()?.is_empty(),
+            Inner::Parallel(reader) => reader.fill_buf()?.is_empty(),
+            Inner::Exhausted { .. } => false,
+            Inner::Failed { .. } => return Err(failed_earlier()),
+        };
+        if empty {
             self.exhaust()?;
         }
         match &mut self.inner {

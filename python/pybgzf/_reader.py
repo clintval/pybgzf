@@ -98,10 +98,17 @@ class BgzfReader(io.RawIOBase):
         """Move to a virtual offset from `tell()` or an index, and return it.
 
         Only `io.SEEK_SET` is supported, and only when the source can seek.
+
+        Raises:
+            ValueError: If the offset is in no block of the file and is not its end.
         """
         self._check_open()
         if whence != io.SEEK_SET:
             raise io.UnsupportedOperation("only seeking to a virtual offset is supported")
+        if offset < 0:
+            raise ValueError(f"negative seek position {offset}")
+        if offset >= 1 << 64:
+            raise ValueError(f"virtual offset {offset} is too large")
         return self._inner.seek(offset)
 
     @override
