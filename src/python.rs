@@ -1,7 +1,9 @@
 //! The `pybgzf._pybgzf` extension module.
 
+use std::collections::VecDeque;
 use std::fs::File;
-use std::io::{self, BufWriter, Write};
+use std::io::{self, BufReader, BufWriter, Read, Seek, SeekFrom, Write};
+use std::num::NonZero;
 use std::path::PathBuf;
 
 use pyo3::buffer::PyBuffer;
@@ -10,6 +12,7 @@ use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyString};
 
 use crate::columns::{Columns, Kind};
+use crate::reader::{AnyIndex, BgzfReader, IndexedReader as CoreIndexedReader, Query, QueryError};
 use crate::sniff;
 use crate::writer::{Error, IndexFormat, IndexOptions, Writer as CoreWriter, check_options};
 
@@ -270,9 +273,305 @@ fn validate_columns(columns: ColumnsTuple) -> PyResult<()> {
     columns_from_tuple(columns).map(drop)
 }
 
+enum Source {
+    File(BufReader<File>),
+    Python { object: Py<PyAny>, seekable: bool },
+}
+
+impl Read for Source {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        match self {
+            Source::File(file) => file.read(buf),
+            Source::Python { object, .. } => Python::attach(|py| {
+                let data = object
+                    .bind(py)
+                    .call_method1("read", (buf.len(),))
+                    .map_err(python_to_io)?;
+                if data.is_none() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::WouldBlock,
+                        "the source has no data yet",
+                    ));
+                }
+                let data = PyBuffer::<u8>::get(&data)
+                    .map_err(python_to_io)?
+                    .to_vec(py)
+                    .map_err(python_to_io)?;
+                let n = data.len().min(buf.len());
+                buf[..n].copy_from_slice(&data[..n]);
+                Ok(n)
+            }),
+        }
+    }
+}
+
+impl Seek for Source {
+    fn seek(&mut self, position: SeekFrom) -> io::Result<u64> {
+        match self {
+            Source::File(file) => file.seek(position),
+            Source::Python {
+                seekable: false, ..
+            } => Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "the source is not seekable",
+            )),
+            Source::Python { object, .. } => Python::attach(|py| {
+                let (offset, whence) = match position {
+                    SeekFrom::Start(offset) => (offset as i64, 0),
+                    SeekFrom::Current(offset) => (offset, 1),
+                    SeekFrom::End(offset) => (offset, 2),
+                };
+                object
+                    .bind(py)
+                    .call_method1("seek", (offset, whence))
+                    .and_then(|at| at.extract::<u64>())
+                    .map_err(python_to_io)
+            }),
+        }
+    }
+}
+
+fn threads(threads: usize) -> PyResult<NonZero<usize>> {
+    NonZero::new(threads).ok_or_else(|| PyValueError::new_err("threads must be at least 1"))
+}
+
+fn io_to_python(error: io::Error) -> PyErr {
+    to_python(Error::Io(error))
+}
+
+fn closed_error() -> PyErr {
+    PyValueError::new_err("I/O operation on closed file.")
+}
+
+fn drop_detached<T: Send>(py: Python<'_>, value: T) {
+    py.detach(move || drop(value));
+}
+
+/// The Rust half of `pybgzf.BgzfReader`.
+#[pyclass(module = "pybgzf._pybgzf")]
+struct Reader {
+    inner: Option<BgzfReader<Source>>,
+}
+
+impl Reader {
+    fn inner(&mut self) -> PyResult<&mut BgzfReader<Source>> {
+        self.inner.as_mut().ok_or_else(closed_error)
+    }
+}
+
+#[pymethods]
+impl Reader {
+    #[new]
+    #[pyo3(signature = (src, *, threads))]
+    fn new(py: Python<'_>, src: &Bound<'_, PyAny>, threads: usize) -> PyResult<Self> {
+        let threads = self::threads(threads)?;
+        let source = if src.is_instance_of::<PyString>() {
+            let path: PathBuf = src.extract()?;
+            Source::File(BufReader::with_capacity(
+                FILE_BUFFER,
+                File::open(path).map_err(io_to_python)?,
+            ))
+        } else {
+            let seekable = src.hasattr("seekable")? && src.call_method0("seekable")?.is_truthy()?;
+            Source::Python {
+                object: src.clone().unbind(),
+                seekable,
+            }
+        };
+        Ok(Self {
+            inner: Some(py.detach(|| BgzfReader::new(source, threads))),
+        })
+    }
+
+    /// Reads up to `size` bytes, fewer only at the end of the stream.
+    fn read<'py>(&mut self, py: Python<'py>, size: usize) -> PyResult<Bound<'py, PyBytes>> {
+        let inner = self.inner()?;
+        let mut buf = vec![0_u8; size];
+        let n = py
+            .detach(|| inner.read_full(&mut buf))
+            .map_err(io_to_python)?;
+        Ok(PyBytes::new(py, &buf[..n]))
+    }
+
+    /// Reads everything that is left.
+    fn readall<'py>(&mut self, py: Python<'py>) -> PyResult<Bound<'py, PyBytes>> {
+        let inner = self.inner()?;
+        let mut buf = Vec::new();
+        py.detach(|| inner.read_to_end(&mut buf))
+            .map_err(io_to_python)?;
+        Ok(PyBytes::new(py, &buf))
+    }
+
+    /// Reads through the next newline.
+    fn readline<'py>(&mut self, py: Python<'py>) -> PyResult<Bound<'py, PyBytes>> {
+        let inner = self.inner()?;
+        let mut line = Vec::new();
+        py.detach(|| inner.read_line(&mut line))
+            .map_err(io_to_python)?;
+        Ok(PyBytes::new(py, &line))
+    }
+
+    /// Returns the virtual position of the next byte.
+    fn tell(&mut self) -> PyResult<u64> {
+        Ok(self.inner()?.virtual_position())
+    }
+
+    /// Moves to a virtual position.
+    fn seek(&mut self, py: Python<'_>, position: u64) -> PyResult<u64> {
+        let inner = self.inner()?;
+        py.detach(|| inner.seek(position)).map_err(io_to_python)?;
+        Ok(inner.virtual_position())
+    }
+
+    /// Stops any worker threads.
+    fn close(&mut self, py: Python<'_>) {
+        if let Some(inner) = self.inner.take() {
+            drop_detached(py, inner);
+        }
+    }
+
+    #[getter]
+    fn closed(&self) -> bool {
+        self.inner.is_none()
+    }
+}
+
+impl Drop for Reader {
+    fn drop(&mut self) {
+        if let Some(inner) = self.inner.take() {
+            Python::attach(|py| drop_detached(py, inner));
+        }
+    }
+}
+
+/// The Rust half of `pybgzf.IndexedReader`.
+#[pyclass(module = "pybgzf._pybgzf")]
+struct IndexedReader {
+    inner: Option<CoreIndexedReader<BufReader<File>>>,
+}
+
+impl IndexedReader {
+    fn inner(&mut self) -> PyResult<&mut CoreIndexedReader<BufReader<File>>> {
+        self.inner.as_mut().ok_or_else(closed_error)
+    }
+}
+
+#[pymethods]
+impl IndexedReader {
+    #[new]
+    #[pyo3(signature = (path, index_path, *, threads))]
+    #[allow(clippy::needless_pass_by_value)]
+    fn new(py: Python<'_>, path: PathBuf, index_path: PathBuf, threads: usize) -> PyResult<Self> {
+        let threads = self::threads(threads)?;
+        let inner = py.detach(|| {
+            let index = AnyIndex::read(&index_path)?;
+            CoreIndexedReader::new(BgzfReader::from_path(&path, threads)?, index)
+        });
+        let inner = inner.map_err(|error| match error.kind() {
+            io::ErrorKind::InvalidData => {
+                PyValueError::new_err(format!("{}: {error}", index_path.display()))
+            }
+            _ => io_to_python(error),
+        })?;
+        Ok(Self { inner: Some(inner) })
+    }
+
+    /// Starts a query for lines overlapping the 0-based, half-open `[start, end)` on `refname`.
+    fn query(slf: Bound<'_, Self>, refname: &str, start: i64, end: i64) -> PyResult<QueryIterator> {
+        if start < 0 || end < start {
+            return Err(PyValueError::new_err(format!(
+                "start must be at least 0 and end at least start, not {start} and {end}"
+            )));
+        }
+        let query = slf
+            .borrow_mut()
+            .inner()?
+            .query(refname.as_bytes(), start, end)
+            .map_err(io_to_python)?;
+        Ok(QueryIterator {
+            reader: slf.unbind(),
+            query,
+            lines: VecDeque::new(),
+            done: false,
+        })
+    }
+
+    #[getter]
+    fn refnames(&mut self) -> PyResult<Vec<String>> {
+        Ok(self
+            .inner()?
+            .names()
+            .map(|name| String::from_utf8_lossy(name).into_owned())
+            .collect())
+    }
+
+    #[getter]
+    fn columns(&mut self) -> PyResult<ColumnsTuple> {
+        Ok(columns_to_tuple(self.inner()?.columns()))
+    }
+
+    /// Stops any worker threads.
+    fn close(&mut self, py: Python<'_>) {
+        if let Some(inner) = self.inner.take() {
+            drop_detached(py, inner);
+        }
+    }
+
+    #[getter]
+    fn closed(&self) -> bool {
+        self.inner.is_none()
+    }
+}
+
+const QUERY_BATCH: usize = 256 * 1024;
+
+/// Lines overlapping a region, read in batches with the GIL released.
+#[pyclass(module = "pybgzf._pybgzf")]
+struct QueryIterator {
+    reader: Py<IndexedReader>,
+    query: Query,
+    lines: VecDeque<Vec<u8>>,
+    done: bool,
+}
+
+#[pymethods]
+impl QueryIterator {
+    fn __iter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
+        slf
+    }
+
+    fn __next__<'py>(&mut self, py: Python<'py>) -> PyResult<Option<Bound<'py, PyString>>> {
+        loop {
+            if let Some(line) = self.lines.pop_front() {
+                let text = std::str::from_utf8(&line)
+                    .map_err(|e| PyValueError::new_err(format!("a line is not UTF-8: {e}")))?;
+                return Ok(Some(PyString::new(py, text)));
+            }
+            if self.done {
+                return Ok(None);
+            }
+            let mut reader = self.reader.bind(py).borrow_mut();
+            let inner = reader.inner()?;
+            let query = &mut self.query;
+            let mut batch = Vec::new();
+            let more = py
+                .detach(|| inner.next_lines(query, &mut batch, QUERY_BATCH))
+                .map_err(|error| match error {
+                    QueryError::Io(error) => io_to_python(error),
+                    QueryError::Invalid(message) => PyValueError::new_err(message),
+                })?;
+            self.done = !more;
+            self.lines.extend(batch);
+        }
+    }
+}
+
 #[pymodule]
 fn _pybgzf(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<Writer>()?;
+    module.add_class::<Reader>()?;
+    module.add_class::<IndexedReader>()?;
+    module.add_class::<QueryIterator>()?;
     module.add_class::<Sniffer>()?;
     module.add_function(wrap_pyfunction!(validate_columns, module)?)?;
     module.add("BLOCK_SIZE", crate::block::BLOCK_SIZE)?;

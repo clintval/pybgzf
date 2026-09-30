@@ -251,6 +251,43 @@ def test_inferred_columns_index_like_tabix(tmp_path: Path) -> None:
         handle.write(VCF)
     assert read_index(tmp_path / "stream.tbi") == read_index(htslib_index(path, TBI, "-p", "vcf"))
 
+
+QUERY_REGIONS = [
+    ("chr1", 0, 1),
+    ("chr1", 99, 100),
+    ("chr1", 120, 20_200),
+    ("chr1", 800, 70_000),
+    ("chr2", 0, 10),
+    ("1", 0, 200),
+    ("1", 160, 170),
+    ("1", 4_000, 10_000),
+    ("X", 156_039_000, 156_041_000),
+]
+
+
+def assert_same_queries(path: Path, text: str, columns: Columns, *args: str) -> None:
+    ours = write(path, text, TBI, columns)
+    theirs = htslib_index(path, TBI, *args)
+    for index_path in (ours, theirs):
+        with pybgzf.IndexedReader(path, index_path=index_path) as reader:
+            for refname, start, end in QUERY_REGIONS:
+                expected = tabix(path, f"{refname}:{start + 1}-{end}").splitlines()
+                assert list(reader.query(refname, start, end)) == expected, (refname, start, end)
+
+
+def test_gff_queries_match_tabix(tmp_path: Path) -> None:
+    assert_same_queries(tmp_path / "a.gff.gz", GFF, Columns.GFF, "-p", "gff")
+
+
+def test_sam_queries_match_tabix(tmp_path: Path) -> None:
+    assert_same_queries(tmp_path / "a.sam.gz", SAM, Columns.SAM, "-p", "sam")
+
+
+@requires_htslib_1_23
+def test_vcf_queries_match_tabix(tmp_path: Path) -> None:
+    assert_same_queries(tmp_path / "a.vcf.gz", VCF, Columns.VCF, "-p", "vcf")
+
+
 BED2 = "#chrom\tposition\n" + "".join(
     f"chr{name}\t{position}\n" for name in (1, 2) for position in range(0, 3_000_000, 173)
 )
@@ -274,3 +311,9 @@ def test_bed2_matches_tabix_point_columns(tmp_path: Path, index: IndexFormat) ->
     ours = write(path, BED2, index, Columns.BED2)
     theirs = htslib_index(path, index, "-0", "-s", "1", "-b", "2", "-e", "2")
     assert_identical(ours, theirs)
+    with pybgzf.IndexedReader(path, index_path=ours) as reader:
+        assert reader.columns == Columns.BED2
+        assert list(reader.query("chr1", 173, 174)) == ["chr1\t173"]
+        assert list(reader.query("chr1", 174, 346)) == []
+        assert list(reader.query("chr2", 0, 347)) == ["chr2\t0", "chr2\t173", "chr2\t346"]
+        assert list(reader.query("chr1", 173, 174)) == tabix(path, "chr1:174-174").splitlines()

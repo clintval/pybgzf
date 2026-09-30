@@ -244,6 +244,7 @@ checksum = "280d401d0358893ad706fb6094a18e7f9e8f3002630f4960889cb702b6e2714e"
 dependencies = [
  "bytes",
  "crossbeam-channel",
+ "libdeflater",
  "rayon",
  "zlib-rs",
 ]
@@ -323,6 +324,7 @@ dependencies = [
  "indexmap",
  "memchr",
  "noodles-bgzf",
+ "noodles-core",
  "noodles-csi",
  "noodles-tabix",
  "pyo3",
