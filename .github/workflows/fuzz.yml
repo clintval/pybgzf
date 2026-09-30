@@ -1,0 +1,54 @@
+name: fuzz
+
+on:
+  schedule:
+    - cron: "23 5 * * 1"
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: fuzz-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_FUZZ_VERSION: 0.13.2
+  CARGO_TERM_COLOR: always
+
+jobs:
+  fuzz:
+    name: fuzz (${{ matrix.target }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read  # to check out the repository
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [parse_columns, index_lines]
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install the nightly Rust toolchain
+        run: rustup toolchain install nightly --profile minimal
+
+      - name: Install cargo-fuzz
+        run: cargo +nightly install cargo-fuzz --locked --version "$CARGO_FUZZ_VERSION"
+
+      - name: Fuzz for ten minutes
+        env:
+          TARGET: ${{ matrix.target }}
+        run: >-
+          cargo +nightly fuzz run "$TARGET" --
+          -max_total_time=600 -rss_limit_mb=4096 -dict=fuzz/columns.dict
+
+      - name: Upload the inputs that failed
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: fuzz-${{ matrix.target }}
+          path: fuzz/artifacts/
+          if-no-files-found: ignore
