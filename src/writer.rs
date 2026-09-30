@@ -18,6 +18,8 @@ use crate::sniff::Sniffer;
 const TABIX_MIN_SHIFT: u32 = 14;
 const TABIX_DEPTH: u32 = 5;
 const TABIX_MAX_SHIFT: u32 = 31;
+const NO_COLUMNS: &str =
+    "could not infer columns because no data lines were written; pass columns explicitly";
 
 /// An error from writing: either I/O failed or the data cannot be indexed.
 #[derive(Debug)]
@@ -316,9 +318,10 @@ impl Indexer {
     }
 
     fn write_index(&mut self, final_offset: u64, first_offset: u64) -> Result<()> {
-        let columns = self.columns.take().ok_or_else(|| {
-            Error::Invalid("could not infer columns because no data lines were written; pass columns explicitly".into())
-        })?;
+        let columns = self
+            .columns
+            .take()
+            .ok_or_else(|| Error::Invalid(NO_COLUMNS.into()))?;
         let (min_shift, depth) = self.bins.unwrap_or_else(|| self.empty_bins());
         let builder = self
             .builder
@@ -530,8 +533,9 @@ impl<W: Write> Writer<W> {
 
     /// Writes the end-of-file marker and then the index, if one was requested.
     ///
-    /// An indexing error that was already reported by [`Writer::write`] is not reported again,
-    /// but no index is written and any existing file at the index path is removed.
+    /// After an indexing error, the data is written without the end-of-file marker, so that
+    /// readers see it as truncated, no index is written, and any existing file at the index path
+    /// is removed. An error already reported by [`Writer::write`] is not reported again.
     pub fn finish(&mut self) -> Result<()> {
         if self.finished {
             return Ok(());
@@ -554,7 +558,15 @@ impl<W: Write> Writer<W> {
             }
         }
         self.final_columns.clone_from(&indexer.columns);
-        let final_offset = self.blocks.finish().map_err(Error::Io)?;
+        if indexer.failure.is_none() && indexer.columns.is_none() {
+            indexer.failure = Some(NO_COLUMNS.into());
+        }
+        let final_offset = if indexer.failure.is_some() {
+            self.blocks.abandon()
+        } else {
+            self.blocks.finish()
+        }
+        .map_err(Error::Io)?;
         let outcome = match indexer.failure.take() {
             Some(message) => Err(Error::Invalid(message)),
             None => {

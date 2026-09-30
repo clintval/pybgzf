@@ -60,6 +60,10 @@ class BgzfWriter(io.RawIOBase):
     When `index` is set, every complete line is parsed with `columns` and added to a tabix or CSI
     index, which is written to `index_path` on close.
     Lines must be sorted by start within each reference, and each reference must be contiguous.
+    If a line cannot be indexed, or columns cannot be inferred, no index is written and the file is
+    left without the BGZF end-of-file marker, so that readers see it as truncated.
+    Otherwise closing, including leaving a `with` block because of an exception or the writer being
+    garbage collected, finishes the file and writes the index for what was written.
 
     Args:
         dest: A path to create, or a writable binary file-like object such as a pipe.
@@ -168,7 +172,7 @@ class BgzfWriter(io.RawIOBase):
 
         Raises:
             ValueError: If the file is closed, or a line cannot be indexed, naming the line.
-                After an indexing error, further writes raise and no index is written.
+                After an indexing error, further writes raise.
         """
         if self.closed:
             raise ValueError("I/O operation on closed file.")
@@ -195,6 +199,7 @@ class BgzfWriter(io.RawIOBase):
     def close(self) -> None:
         """Write the remaining data, the BGZF end-of-file marker, and then the index.
 
+        After an indexing error, the end-of-file marker and the index are not written.
         A file-like `dest` is flushed but not closed.
 
         Raises:

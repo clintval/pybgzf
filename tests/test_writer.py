@@ -13,6 +13,7 @@ from pybgzf import INFER
 from pybgzf import BgzfWriter
 from pybgzf import Columns
 from pybgzf import IndexFormat
+from pybgzf import Infer
 
 from tests.helpers import bed_text
 from tests.indexes import ParsedIndex
@@ -512,3 +513,40 @@ def test_huge_cigar_lengths_saturate(tmp_path: Path) -> None:
     with BgzfWriter(tmp_path / "a.sam.gz", index=IndexFormat.CSI, columns=Columns.SAM) as writer:
         with pytest.raises(ValueError, match="beyond the limit"):
             writer.write(b"r\t0\tchr1\t5\t60\t9223372036854775807M2M\t*\t0\t0\tA\tI\n")
+
+
+EOF_MARKER = bytes.fromhex("1f8b08040000000000ff0600424302001b0003000000000000000000")
+
+
+@pytest.mark.parametrize(
+    ("data", "columns"),
+    [
+        (b"chr1\t100\t200\nchr1\t50\t60\n", Columns.BED),
+        (b"chr1\t100\t200\nchr1\t50", Columns.BED),
+        (b"# nothing but comments\n", INFER),
+    ],
+    ids=["unsorted", "unterminated", "uninferred"],
+)
+@pytest.mark.parametrize("threads", [1, 3])
+def test_an_indexing_error_leaves_the_file_visibly_truncated(
+    tmp_path: Path, data: bytes, columns: Columns | Infer, threads: int
+) -> None:
+    path = tmp_path / "out.bed.gz"
+    writer = BgzfWriter(path, threads=threads, index=IndexFormat.TBI, columns=columns)
+    with pytest.raises(ValueError):
+        writer.write(data)
+        writer.close()
+    writer.close()
+    compressed = path.read_bytes()
+    assert not compressed.endswith(EOF_MARKER)
+    assert gzip.decompress(compressed) in (data, data[: data.index(b"\n") + 1])
+    assert not Path(f"{path}.tbi").exists()
+
+
+def test_leaving_a_with_block_early_finishes_the_file(tmp_path: Path) -> None:
+    path = tmp_path / "out.bed.gz"
+    with pytest.raises(RuntimeError), BgzfWriter(path, index=IndexFormat.TBI, columns=BED) as w:
+        w.write(b"chr1\t1\t2\n")
+        raise RuntimeError
+    assert path.read_bytes().endswith(EOF_MARKER)
+    assert Path(f"{path}.tbi").exists()

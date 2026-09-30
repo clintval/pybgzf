@@ -170,13 +170,25 @@ impl<W: Write> BlockWriter<W> {
     /// Writes all remaining data and the BGZF end-of-file marker, returning the virtual position
     /// of the marker.
     pub fn finish(&mut self) -> io::Result<u64> {
+        self.finish_with(true)
+    }
+
+    /// Writes all remaining data but no end-of-file marker, so that readers see the stream as
+    /// truncated, returning the virtual position where the marker would be.
+    pub fn abandon(&mut self) -> io::Result<u64> {
+        self.finish_with(false)
+    }
+
+    fn finish_with(&mut self, eof: bool) -> io::Result<u64> {
         self.end_block()?;
         self.wait_all()?;
         self.stop_workers();
         let eof_start = self.bytes_written;
-        let mut eof = Vec::new();
-        Compressor::append_eof(&mut eof);
-        self.sink.write_all(&eof)?;
+        if eof {
+            let mut marker = Vec::new();
+            Compressor::append_eof(&mut marker);
+            self.sink.write_all(&marker)?;
+        }
         self.sink.flush()?;
         self.finished = true;
         Ok(eof_start << 16)
