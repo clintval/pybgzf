@@ -10,7 +10,7 @@ use std::thread;
 use pyo3::buffer::PyBuffer;
 use pyo3::exceptions::{PyOSError, PyUserWarning, PyValueError};
 use pyo3::prelude::*;
-use pyo3::types::{PyBytes, PyString, PyType};
+use pyo3::types::{PyBytes, PyString};
 
 use crate::Error;
 use crate::columns::{Columns, Kind};
@@ -52,18 +52,6 @@ enum LineKind {
     Vcf,
 }
 
-#[pymethods]
-impl LineKind {
-    fn __reduce__<'py>(slf: &Bound<'py, Self>) -> PyResult<Reduced<'py>> {
-        let name = match *slf.get() {
-            LineKind::Generic => "GENERIC",
-            LineKind::Sam => "SAM",
-            LineKind::Vcf => "VCF",
-        };
-        reduce_to_attribute(slf.as_any(), name)
-    }
-}
-
 impl From<LineKind> for Kind {
     fn from(kind: LineKind) -> Self {
         match kind {
@@ -84,17 +72,6 @@ impl From<Kind> for LineKind {
     }
 }
 
-type Reduced<'py> = (Bound<'py, PyAny>, (Bound<'py, PyType>, &'static str));
-
-/// Pickles an enum member as its class and name, which unpickling looks up with `getattr`.
-fn reduce_to_attribute<'py>(
-    member: &Bound<'py, PyAny>,
-    name: &'static str,
-) -> PyResult<Reduced<'py>> {
-    let getattr = PyModule::import(member.py(), "builtins")?.getattr("getattr")?;
-    Ok((getattr, (member.get_type(), name)))
-}
-
 /// The value of each `pybgzf.IndexFormat` member.
 #[pyclass(module = "pybgzf._pybgzf", eq, frozen, hash, from_py_object)]
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
@@ -103,17 +80,6 @@ enum IndexKind {
     Tabix,
     #[pyo3(name = "CSI")]
     Csi,
-}
-
-#[pymethods]
-impl IndexKind {
-    fn __reduce__<'py>(slf: &Bound<'py, Self>) -> PyResult<Reduced<'py>> {
-        let name = match *slf.get() {
-            IndexKind::Tabix => "TBI",
-            IndexKind::Csi => "CSI",
-        };
-        reduce_to_attribute(slf.as_any(), name)
-    }
 }
 
 enum Sink {

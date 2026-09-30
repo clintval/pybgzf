@@ -6,8 +6,11 @@ from dataclasses import dataclass
 from enum import Enum
 from enum import auto
 from pathlib import Path
+from typing import Any
 from typing import ClassVar
 from typing import Final
+
+from typing_extensions import override
 
 from pybgzf import _pybgzf
 
@@ -18,6 +21,11 @@ _COMPRESSION_SUFFIXES: Final = (".gz", ".bgz", ".bgzf")
 
 class LineFormat(Enum):
     """How a line's end is found, which tabix also records as the file format."""
+
+    @override
+    def __reduce_ex__(self, proto: object) -> tuple[Any, ...]:
+        """Pickle by name, since the value is an extension object."""
+        return getattr, (type(self), self.name)
 
     GENERIC = _pybgzf.LineKind.GENERIC
     """The end is read from the end column, or the line covers one base if there is none."""

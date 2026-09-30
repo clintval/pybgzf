@@ -5,6 +5,7 @@ import io
 import os
 import stat
 from enum import Enum
+from typing import Any
 from typing import Protocol
 
 from typing_extensions import Buffer
@@ -19,6 +20,11 @@ from pybgzf._columns import columns_to_tuple
 
 class IndexFormat(Enum):
     """The kind of index to build while writing."""
+
+    @override
+    def __reduce_ex__(self, proto: object) -> tuple[Any, ...]:
+        """Pickle by name, since the value is an extension object."""
+        return getattr, (type(self), self.name)
 
     TBI = _pybgzf.IndexKind.TBI
     """A tabix index, for references up to 2^29 bases."""
