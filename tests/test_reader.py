@@ -279,3 +279,63 @@ def test_reads_files_written_by_bgzip(tmp_path: Path, lines: list[str]) -> None:
         assert list(reader.query("chr2", 1_000, 90_000)) == overlapping(
             lines, "chr2", 1_000, 90_000
         )
+
+
+def corrupted(data_dir: Path, kind: str) -> bytes:
+    compressed = bed_path(data_dir, IndexFormat.TBI).read_bytes()
+    if kind == "truncated":
+        return compressed[: len(compressed) // 2]
+    if kind == "garbage":
+        return random.Random(3).randbytes(len(compressed))
+    return gzip.compress(gzip.decompress(compressed))
+
+
+CORRUPTIONS = ["truncated", "garbage", "plain gzip"]
+
+
+@pytest.mark.parametrize("kind", CORRUPTIONS)
+@pytest.mark.parametrize("threads", [1, 4])
+@pytest.mark.parametrize("from_path", [True, False], ids=["path", "file-like"])
+def test_corrupt_input_raises(
+    tmp_path: Path, data_dir: Path, kind: str, threads: int, from_path: bool
+) -> None:
+    data = corrupted(data_dir, kind)
+    path = tmp_path / "corrupt.gz"
+    path.write_bytes(data)
+
+    def source() -> Path | io.BytesIO:
+        return path if from_path else io.BytesIO(data)
+
+    with pytest.raises(OSError), BgzfReader(source(), threads=threads) as reader:
+        reader.readall()
+    with pytest.raises(OSError), BgzfReader(source(), threads=threads) as reader:
+        while reader.readline():
+            pass
+    with pytest.raises(OSError), pybgzf.open_reader(source(), threads=threads) as handle:
+        handle.read()
+
+
+@pytest.mark.parametrize("kind", CORRUPTIONS)
+@pytest.mark.parametrize("threads", [1, 4])
+def test_corrupt_input_raises_from_queries(
+    tmp_path: Path, data_dir: Path, kind: str, threads: int
+) -> None:
+    path = tmp_path / "corrupt.bed.gz"
+    path.write_bytes(corrupted(data_dir, kind))
+    shutil.copyfile(f"{bed_path(data_dir, IndexFormat.TBI)}.tbi", f"{path}.tbi")
+    with IndexedReader(path, threads=threads) as reader, pytest.raises(OSError):
+        for refname in REFERENCES:
+            list(reader.query(refname, 0, 10**9))
+
+
+@pytest.mark.parametrize("threads", [1, 4])
+def test_seeking_after_the_end_reads_again(data_dir: Path, threads: int) -> None:
+    path = bed_path(data_dir, IndexFormat.TBI)
+    with BgzfReader(path, threads=threads) as reader:
+        first = reader.readline()
+        end = len(reader.readall()) + len(first)
+        assert reader.read(10) == b""
+        assert reader.tell() == reader.tell()
+        reader.seek(0)
+        assert reader.readline() == first
+        assert len(first) + len(reader.readall()) == end

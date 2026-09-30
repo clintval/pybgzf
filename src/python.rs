@@ -379,7 +379,10 @@ impl Reader {
             }
         };
         Ok(Self {
-            inner: Some(py.detach(|| BgzfReader::new(source, threads))),
+            inner: Some(
+                py.detach(|| BgzfReader::new(source, threads))
+                    .map_err(io_to_python)?,
+            ),
         })
     }
 

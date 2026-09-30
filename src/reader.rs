@@ -3,6 +3,7 @@
 use std::fs::File;
 use std::io::{self, BufRead, BufReader, Read, Seek};
 use std::num::NonZero;
+use std::panic::{self, AssertUnwindSafe};
 use std::path::Path;
 
 use indexmap::IndexSet;
@@ -23,47 +24,72 @@ const FILE_BUFFER: usize = 128 * 1024;
 enum Inner<R: Read + Send + 'static> {
     Serial(SerialReader<R>),
     Parallel(MultithreadedReader<R>),
+    Exhausted { source: R, position: u64 },
+    Failed { position: u64 },
 }
 
 /// Decompresses BGZF in the calling thread or on worker threads, tracking virtual positions.
 pub struct BgzfReader<R: Read + Seek + Send + 'static> {
     inner: Inner<R>,
+    threads: NonZero<usize>,
+}
+
+fn parallel<R: Read + Send + 'static>(
+    threads: NonZero<usize>,
+    source: R,
+) -> io::Result<MultithreadedReader<R>> {
+    panic::catch_unwind(AssertUnwindSafe(|| {
+        MultithreadedReader::with_worker_count(threads, source)
+    }))
+    .map_err(|_| io::Error::other("could not start the decompression threads"))
+}
+
+fn failed_earlier() -> io::Error {
+    io::Error::other("the reader failed earlier")
 }
 
 impl BgzfReader<BufReader<File>> {
     /// Opens a BGZF file.
     pub fn from_path<P: AsRef<Path>>(path: P, threads: NonZero<usize>) -> io::Result<Self> {
         let file = BufReader::with_capacity(FILE_BUFFER, File::open(path)?);
-        Ok(Self::new(file, threads))
+        Self::new(file, threads)
     }
 }
 
 impl<R: Read + Seek + Send + 'static> BgzfReader<R> {
     /// Reads BGZF from `source`, decompressing on `threads` worker threads when more than one.
-    pub fn new(source: R, threads: NonZero<usize>) -> Self {
+    pub fn new(source: R, threads: NonZero<usize>) -> io::Result<Self> {
         let inner = if threads.get() == 1 {
             Inner::Serial(SerialReader::new(source))
         } else {
-            Inner::Parallel(MultithreadedReader::with_worker_count(threads, source))
+            Inner::Parallel(parallel(threads, source)?)
         };
-        Self { inner }
+        Ok(Self { inner, threads })
     }
 
     /// Returns the virtual position of the next byte to be read.
     pub fn virtual_position(&self) -> u64 {
-        u64::from(match &self.inner {
-            Inner::Serial(reader) => reader.virtual_position(),
-            Inner::Parallel(reader) => reader.virtual_position(),
-        })
+        match &self.inner {
+            Inner::Serial(reader) => u64::from(reader.virtual_position()),
+            Inner::Parallel(reader) => u64::from(reader.virtual_position()),
+            Inner::Exhausted { position, .. } | Inner::Failed { position } => *position,
+        }
     }
 
     /// Moves to a virtual position, which must be the start of a line or record for the reads
     /// that follow to make sense.
     pub fn seek(&mut self, position: u64) -> io::Result<()> {
+        if let Inner::Exhausted { .. } = self.inner {
+            let stopped = std::mem::replace(&mut self.inner, Inner::Failed { position: 0 });
+            if let Inner::Exhausted { source, .. } = stopped {
+                self.inner = Inner::Parallel(parallel(self.threads, source)?);
+            }
+        }
         let position = VirtualPosition::from(position);
         match &mut self.inner {
             Inner::Serial(reader) => reader.seek(position).map(drop),
             Inner::Parallel(reader) => reader.seek_to_virtual_position(position).map(drop),
+            Inner::Exhausted { .. } | Inner::Failed { .. } => Err(failed_earlier()),
         }
     }
 
@@ -90,24 +116,52 @@ impl<R: Read + Seek + Send + 'static> BgzfReader<R> {
         match self.inner {
             Inner::Serial(reader) => Ok(reader.into_inner()),
             Inner::Parallel(mut reader) => reader.finish(),
+            Inner::Exhausted { source, .. } => Ok(source),
+            Inner::Failed { .. } => Err(failed_earlier()),
         }
+    }
+
+    /// Stops the worker threads at the end of the stream, which reports any error the thread
+    /// reading compressed blocks met, such as a truncated or corrupt block.
+    fn exhaust(&mut self) -> io::Result<()> {
+        let position = self.virtual_position();
+        if let Inner::Parallel(mut reader) =
+            std::mem::replace(&mut self.inner, Inner::Failed { position })
+        {
+            self.inner = Inner::Exhausted {
+                source: reader.finish()?,
+                position,
+            };
+        }
+        Ok(())
     }
 }
 
 impl<R: Read + Seek + Send + 'static> Read for BgzfReader<R> {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        match &mut self.inner {
-            Inner::Serial(reader) => reader.read(buf),
-            Inner::Parallel(reader) => reader.read(buf),
+        if let Inner::Serial(reader) = &mut self.inner {
+            return reader.read(buf);
         }
+        let data = self.fill_buf()?;
+        let n = data.len().min(buf.len());
+        buf[..n].copy_from_slice(&data[..n]);
+        self.consume(n);
+        Ok(n)
     }
 }
 
 impl<R: Read + Seek + Send + 'static> BufRead for BgzfReader<R> {
     fn fill_buf(&mut self) -> io::Result<&[u8]> {
+        if let Inner::Parallel(reader) = &mut self.inner
+            && reader.fill_buf()?.is_empty()
+        {
+            self.exhaust()?;
+        }
         match &mut self.inner {
             Inner::Serial(reader) => reader.fill_buf(),
             Inner::Parallel(reader) => reader.fill_buf(),
+            Inner::Exhausted { .. } => Ok(&[]),
+            Inner::Failed { .. } => Err(failed_earlier()),
         }
     }
 
@@ -115,6 +169,7 @@ impl<R: Read + Seek + Send + 'static> BufRead for BgzfReader<R> {
         match &mut self.inner {
             Inner::Serial(reader) => reader.consume(amount),
             Inner::Parallel(reader) => reader.consume(amount),
+            Inner::Exhausted { .. } | Inner::Failed { .. } => {}
         }
     }
 }
@@ -419,6 +474,18 @@ mod tests {
     }
 
     #[test]
+    fn truncated_input_is_an_error_with_any_thread_count() {
+        let data = bed(20_000);
+        let (_dir, path, _) = written(&data, IndexFormat::Tabix);
+        let compressed = std::fs::read(&path).unwrap();
+        let truncated = compressed[..compressed.len() / 2].to_vec();
+        for n in [1, 3] {
+            let mut reader = BgzfReader::new(Cursor::new(truncated.clone()), threads(n)).unwrap();
+            assert!(reader.read_to_end(&mut Vec::new()).is_err(), "threads={n}");
+        }
+    }
+
+    #[test]
     fn seeks_to_virtual_positions() {
         let data = bed(20_000);
         let (_dir, path, _) = written(&data, IndexFormat::Tabix);
@@ -527,6 +594,7 @@ mod tests {
         assert!(AnyIndex::read(&path).is_err());
         assert!(
             BgzfReader::new(Cursor::new(Vec::new()), threads(1))
+                .unwrap()
                 .read_line(&mut Vec::new())
                 .is_ok()
         );
