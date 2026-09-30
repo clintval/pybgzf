@@ -519,4 +519,131 @@ mod tests {
             .is_err()
         );
     }
+
+    #[test]
+    fn integers_of_any_length_are_exact_up_to_i64_max_and_saturate_beyond() {
+        let mut magnitudes = Vec::from(
+            [
+                "12345678901234567",
+                "123456789012345678",
+                "9223372036854775806",
+                "9223372036854775807",
+                "9223372036854775808",
+                "18446744073709551616",
+            ]
+            .map(String::from),
+        );
+        for n in 1..=21 {
+            let zeros = "0".repeat(n - 1);
+            magnitudes.extend(["9".repeat(n), format!("1{zeros}"), format!("{zeros}7")]);
+        }
+        for digits in magnitudes {
+            let magnitude = i64::try_from(digits.parse::<u128>().unwrap()).unwrap_or(i64::MAX);
+            for (sign, value) in [("", magnitude), ("+", magnitude), ("-", -magnitude)] {
+                for prefix in ["", " ", "\x0c\r "] {
+                    for suffix in ["", "x", ";", "M", ".5", "\u{663}"] {
+                        let text = format!("{prefix}{sign}{digits}{suffix}");
+                        let used = prefix.len() + sign.len() + digits.len();
+                        let parsed = integer_prefix(text.as_bytes());
+                        assert_eq!(parsed, Some((value, used)), "{text:?}");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn integers_need_a_digit_right_after_the_sign() {
+        for text in [
+            "", " ", "x", "+", "-", "+-5", "-+5", "--5", "+ 5", "- 5", "\x0b5", ".5", "\u{663}",
+        ] {
+            assert_eq!(integer_prefix(text.as_bytes()), None, "{text:?}");
+        }
+    }
+
+    #[test]
+    fn leading_digits_take_no_whitespace_or_sign() {
+        for text in ["", " 5", "+5", "-5", "x5"] {
+            assert_eq!(leading_digits(text.as_bytes()), None, "{text:?}");
+        }
+        assert_eq!(
+            leading_digits(b"123456789012345678,"),
+            Some((123_456_789_012_345_678, 18))
+        );
+        assert_eq!(
+            leading_digits(b"12345678901234567890>"),
+            Some((i64::MAX, 20))
+        );
+    }
+
+    #[test]
+    fn integer_columns_are_exact_up_to_i64_max_and_saturate_beyond() {
+        let max = i64::MAX;
+        for (field, value) in [
+            ("12345678901234567", 12_345_678_901_234_567),
+            ("123456789012345678", 123_456_789_012_345_678),
+            ("1234567890123456789", 1_234_567_890_123_456_789),
+            ("12345678901234567890", max),
+            ("9223372036854775807", max),
+            ("9223372036854775808", max),
+            ("000000000000000000000042", 42),
+            ("007", 7),
+            ("0x1f", 0),
+            ("+5", 5),
+            (" 5", 5),
+            ("5x", 5),
+        ] {
+            let line = format!("c\t{field}\t{field}");
+            assert_eq!(interval(&Columns::bed(), &line), named("c", value, value));
+        }
+        assert_eq!(interval(&Columns::bed(), "c\t-5\t10"), named("c", 0, 10));
+        assert_eq!(interval(&Columns::bed(), "c\t-0\t+0"), named("c", 0, 0));
+    }
+
+    #[test]
+    fn integers_inside_cigars_and_info_are_exact_up_to_i64_max() {
+        let sam = "r\t0\tc\t1\t60\t123456789012345678M2D\t*\t0\t0\tA\tI";
+        let end = 123_456_789_012_345_680;
+        assert_eq!(interval(&Columns::sam(), sam), named("c", 0, end));
+        let vcf = Columns::vcf();
+        let line = "1\t100\t.\tA\t<DEL>\t.\t.\tEND=123456789012345678;SVTYPE=DEL";
+        let end = 123_456_789_012_345_678;
+        assert_eq!(interval(&vcf, line), named("1", 99, end));
+        let line = "1\t100\t.\tA\t<DEL>\t.\t.\tEND=0000000000000000000500;SVTYPE=DEL";
+        assert_eq!(interval(&vcf, line), named("1", 99, 500));
+        let line = "1\t100\t.\tA\t<DEL>\t.\t.\tSVLEN=-123456789012345678;SVTYPE=DEL";
+        let end = 123_456_789_012_345_777;
+        assert_eq!(interval(&vcf, line), named("1", 99, end));
+    }
+
+    #[test]
+    fn parse_errors() {
+        let bed = |line: &[u8]| Columns::bed().parse(line).unwrap_err();
+        assert_eq!(bed(b"chr1"), "expected at least 2 tab-separated columns");
+        assert_eq!(bed(b"chr1\t\t3"), r#"column 2 is not an integer: """#);
+        assert_eq!(bed(b"chr1\tx\t3"), r#"column 2 is not an integer: "x""#);
+        assert_eq!(bed(b"chr1\t+\t3"), r#"column 2 is not an integer: "+""#);
+        assert_eq!(bed(b"chr1\t- 5\t3"), r#"column 2 is not an integer: "- 5""#);
+        assert_eq!(
+            bed(b"chr1\t\xff\t3"),
+            "column 2 is not an integer: \"\u{fffd}\""
+        );
+        assert_eq!(bed(b"chr1\t1\t"), r#"column 3 is not an integer: """#);
+        assert_eq!(bed(b"chr1\t1\t-"), r#"column 3 is not an integer: "-""#);
+        assert_eq!(bed(b"chr1\t1\t-5"), "the end position -5 is negative");
+        let huge = bed(b"chr1\t1\t-99999999999999999999");
+        assert_eq!(huge, "the end position -9223372036854775807 is negative");
+        let gff = |line: &[u8]| Columns::gff().parse(line).unwrap_err();
+        assert_eq!(gff(b"c\ts\tt"), "expected at least 4 tab-separated columns");
+        assert_eq!(gff(b"c\ts\tt\t1\tx"), r#"column 5 is not an integer: "x""#);
+        let sam = |line: &[u8]| Columns::sam().parse(line).unwrap_err();
+        assert_eq!(
+            sam(b"r\t0\tchr1"),
+            "expected at least 4 tab-separated columns"
+        );
+        assert_eq!(sam(b"r\t0\tchr1\tx"), r#"column 4 is not an integer: "x""#);
+        let vcf = |line: &[u8]| Columns::vcf().parse(line).unwrap_err();
+        assert_eq!(vcf(b"1"), "expected at least 2 tab-separated columns");
+        assert_eq!(vcf(b"1\tx"), r#"column 2 is not an integer: "x""#);
+    }
 }
