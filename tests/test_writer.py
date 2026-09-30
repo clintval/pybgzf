@@ -236,6 +236,8 @@ def test_sink_errors_keep_their_type() -> None:
         writer.write(b"x" * (BLOCK_SIZE + 1))
     with pytest.raises(OSError, match="failed earlier"):
         writer.write(b"x")
+    with pytest.raises(OSError, match="failed earlier"):
+        writer.close()
 
 
 def test_text_mode(tmp_path: Path) -> None:

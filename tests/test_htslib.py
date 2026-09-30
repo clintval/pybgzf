@@ -348,3 +348,50 @@ def test_bed2_matches_tabix_point_columns(tmp_path: Path, index: IndexFormat) ->
         assert list(reader.query("chr1", 174, 346)) == []
         assert list(reader.query("chr2", 0, 347)) == ["chr2\t0", "chr2\t173", "chr2\t346"]
         assert list(reader.query("chr1", 173, 174)) == tabix(path, "chr1:174-174").splitlines()
+
+
+def random_bed_stream(rng: random.Random) -> bytes:
+    """Sorted BED text with zero-length and bin-boundary features, long lines, and comments."""
+    lines = ["#chrom\tstart\tend\n"]
+    for reference in range(rng.choice([1, 3, 60])):
+        position = 0
+        for _ in range(rng.randint(1, 300)):
+            position += rng.choice([0, 1, 16384 - position % 16384, rng.randint(0, 50_000)])
+            width = rng.choice([0, 1, 16384, rng.randint(1, 2_000_000)])
+            padding = "x" * rng.choice([0, 0, 0, 70_000])
+            lines.append(f"c{reference}\t{position}\t{position + width}\t{padding}\n")
+            if rng.random() < 0.02:
+                lines.append("#between records\n")
+    text = "".join(lines)
+    if rng.random() < 0.3:
+        text = text.replace("\n", "\r\n")
+    if rng.random() < 0.3:
+        text = text.rstrip("\r\n")
+    return text.encode()
+
+
+@pytest.mark.parametrize("seed", range(8))
+def test_random_streams_index_like_tabix(tmp_path: Path, seed: int) -> None:
+    rng = random.Random(seed)
+    data = random_bed_stream(rng)
+    index = rng.choice([TBI, CSI])
+    for threads in (1, 3):
+        path = tmp_path / f"s{threads}.bed.gz"
+        with BgzfWriter(path, threads=threads, index=index, columns=Columns.BED) as writer:
+            at = 0
+            while at < len(data):
+                size = rng.choice([1, 7, 1000, 65280, 300_000])
+                writer.write(data[at : at + size])
+                at += size
+                if rng.random() < 0.05:
+                    writer.flush()
+        ours = Path(f"{path}.{index.name.lower()}")
+        assert_identical(ours, htslib_index(path, index, "-p", "bed"))
+
+
+def test_the_tabix_limit_matches_tabix(tmp_path: Path) -> None:
+    path = tmp_path / "edge.bed.gz"
+    assert_same_index(path, "chr1\t1\t536870912\n", TBI, Columns.BED, "-p", "bed")
+    with BgzfWriter(tmp_path / "over.bed.gz", index=TBI, columns=Columns.BED) as writer:
+        with pytest.raises(ValueError, match="beyond the tabix limit"):
+            writer.write(b"chr1\t1\t536870913\n")
