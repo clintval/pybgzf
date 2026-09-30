@@ -220,7 +220,7 @@ body = """
 [tool.git-cliff.git]
 conventional_commits = true
 commit_parsers = [
-    { message = "^.+!:*", group = "Breaking"},
+    { message = "^[a-z]+(\\(.+\\))?!:", group = "Breaking"},
     { message = "^security*", group = "Security"},
     { message = "^feat*", group = "Features"},
     { message = "^fix*", group = "Bug Fixes"},
@@ -229,7 +229,11 @@ commit_parsers = [
     { message = "^refactor*", group = "Refactor"},
     { message = "^style*", group = "Styling"},
     { message = "^test*", group = "Testing"},
+    { message = "^build*", group = "Build"},
+    { message = "^ci*", group = "Continuous Integration"},
+    { message = "^revert*", group = "Reverts"},
     { message = "^chore\\(release\\):*", skip = true},
+    { message = "^chore\\(deps\\)", skip = true},
     { message = "^chore*", group = "Miscellaneous Tasks"},
     { body = ".*security", group = "Security"}
 ]
