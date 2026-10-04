@@ -373,7 +373,7 @@ mod tests {
         let mut writer = BlockWriter::new(Vec::new(), level(6), threads(1)).unwrap();
         assert_eq!(writer.finish(true).unwrap(), 0);
         assert_eq!(writer.get_ref().len(), 28);
-        assert!(decompress(writer.get_ref()).is_empty());
+        assert_eq!(decompress(writer.get_ref()), b"");
     }
 
     #[test]
