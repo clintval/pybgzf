@@ -3,7 +3,9 @@ from collections.abc import Callable
 from collections.abc import Iterator
 from pathlib import Path
 
+import pybgzf
 import pytest
+from pybgzf import BGZF_SUFFIXES
 from pybgzf import Columns
 from pybgzf import IndexFormat
 from pybgzf import Infer
@@ -27,6 +29,17 @@ from pybgzf import LineFormat
 def test_from_path(name: str, expected: Columns) -> None:
     assert Columns.from_path(name) == expected
     assert Columns.from_path(Path(name)) == expected
+
+
+def test_bgzf_suffixes_are_exported() -> None:
+    assert "BGZF_SUFFIXES" in pybgzf.__all__
+    assert BGZF_SUFFIXES == (".gz", ".bgz", ".bgzf")
+
+
+@pytest.mark.parametrize("suffix", BGZF_SUFFIXES)
+def test_from_path_ignores_each_bgzf_suffix(suffix: str) -> None:
+    assert Columns.from_path(f"a.vcf{suffix}") == Columns.VCF
+    assert Columns.from_path(f"a.bed{suffix.upper()}") == Columns.BED
 
 
 @pytest.mark.parametrize("name", ["a.txt", "a.gz", "a.bed.gz.gz", "bed", "a.bam", "a.tsv.gz"])

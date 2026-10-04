@@ -16,7 +16,8 @@ from pybgzf import _pybgzf
 
 ColumnsTuple = tuple[int, int, int | None, bool, str, int, _pybgzf.LineKind]
 
-_COMPRESSION_SUFFIXES: Final = (".gz", ".bgz", ".bgzf")
+BGZF_SUFFIXES: Final[tuple[str, ...]] = (".gz", ".bgz", ".bgzf")
+"""The file name suffixes of BGZF files, which any gzip reader can also read."""
 
 
 class LineFormat(Enum):
@@ -92,7 +93,7 @@ class Columns:
             ValueError: If the file name has none of these suffixes.
         """
         name = Path(path).name.lower()
-        name = next((name.removesuffix(s) for s in _COMPRESSION_SUFFIXES if name.endswith(s)), name)
+        name = next((name.removesuffix(s) for s in BGZF_SUFFIXES if name.endswith(s)), name)
         presets = {".bed": cls.BED, ".gff": cls.GFF, ".gff3": cls.GFF, ".gtf": cls.GFF}
         presets |= {".sam": cls.SAM, ".vcf": cls.VCF}
         if (preset := presets.get(Path(name).suffix)) is not None:

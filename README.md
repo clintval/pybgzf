@@ -44,6 +44,15 @@ Write sorted BED lines as text and the index appears next to the file on close:
 ```
 
 The output is ordinary BGZF, so `gzip -d`, `bgzip -d`, and `tabix features.bed.gz chr1:120-160` all read it.
+`pybgzf.BGZF_SUFFIXES` holds the file name suffixes of BGZF files, for deciding when to write one:
+
+```python
+>>> pybgzf.BGZF_SUFFIXES
+('.gz', '.bgz', '.bgzf')
+>>> path.name.endswith(pybgzf.BGZF_SUFFIXES)
+True
+
+```
 
 Stream bytes to a pipe or any binary file object, with columns inferred from the content:
 

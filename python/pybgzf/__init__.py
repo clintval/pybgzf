@@ -2,6 +2,7 @@
 
 import importlib.metadata
 
+from pybgzf._columns import BGZF_SUFFIXES
 from pybgzf._columns import INFER
 from pybgzf._columns import Columns
 from pybgzf._columns import Infer
@@ -19,6 +20,7 @@ from pybgzf._writer import writer
 __version__ = importlib.metadata.version("pybgzf")
 
 __all__ = [
+    "BGZF_SUFFIXES",
     "INFER",
     "BgzfReader",
     "BgzfWriter",
