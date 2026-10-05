@@ -6,6 +6,7 @@ import os
 import stat
 import threading
 from enum import Enum
+from types import TracebackType
 from typing import Any
 from typing import Protocol
 
@@ -69,11 +70,12 @@ class BgzfWriter(io.RawIOBase):
     index, which is written to `index_path` on close.
     Lines must be sorted by start within each reference, and each reference must be contiguous.
     The index file is created, empty, with the writer and written on close.
-    If a line cannot be indexed, or columns cannot be inferred, the index file is removed and the
-    file is left without the BGZF end-of-file marker, so that readers see it as truncated.
+    If a line cannot be indexed, columns cannot be inferred, or an exception leaves a `with` block,
+    the index file is removed and the file is left without the BGZF end-of-file marker, so that
+    readers see it as truncated.
     The index file is also removed if writing fails.
-    Otherwise closing, including leaving a `with` block because of an exception or the writer being
-    garbage collected, finishes the file and writes the index for what was written.
+    Otherwise closing, including the writer being garbage collected, finishes the file and writes
+    the index for what was written.
     Threads sharing a writer take turns, as with the standard library's buffered files, so the
     bytes of each write stay together.
 
@@ -215,15 +217,61 @@ class BgzfWriter(io.RawIOBase):
         Raises:
             ValueError: If the last line cannot be indexed, or columns could not be inferred.
         """
+        self._end(finish=True)
+
+    def _end(self, *, finish: bool) -> None:
         with self._closing:
             if self.closed:
                 return
             inner: _pybgzf.Writer | None = getattr(self, "_inner", None)
             try:
-                if inner is not None:
+                if inner is not None and finish:
                     inner.close()
+                elif inner is not None:
+                    inner.abandon()
             finally:
                 super().close()
+
+    @override
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_val: BaseException | None,
+        exc_tb: TracebackType | None,
+    ) -> None:
+        """Close, or leave the file unfinished if an exception is leaving the `with` block."""
+        if exc_type is not None:
+            self._end(finish=False)
+        super().__exit__(exc_type, exc_val, exc_tb)
+
+
+class _TextWriter(io.TextIOWrapper):
+    """Text over a `BgzfWriter`, left unfinished if an exception leaves its `with` block."""
+
+    def __init__(
+        self,
+        raw: BgzfWriter,
+        *,
+        encoding: str,
+        errors: str | None,
+        newline: str,
+        write_through: bool,
+    ) -> None:
+        self._raw: BgzfWriter = raw
+        super().__init__(
+            raw, encoding=encoding, errors=errors, newline=newline, write_through=write_through
+        )
+
+    @override
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_val: BaseException | None,
+        exc_tb: TracebackType | None,
+    ) -> None:
+        if exc_type is not None:
+            self._raw.__exit__(exc_type, exc_val, exc_tb)
+        super().__exit__(exc_type, exc_val, exc_tb)
 
 
 def writer(
@@ -242,6 +290,8 @@ def writer(
 ) -> io.TextIOWrapper:
     """Open a BGZF file for writing text, so that `csv` and other text writers can write to it.
 
+    As with `BgzfWriter`, an exception leaving a `with` block leaves the file unfinished, without
+    its end-of-file marker or index.
     The encoding defaults to UTF-8 and `errors` works as in `io.TextIOWrapper`.
     Lines end in a line feed on every platform unless `newline` is given, which then works as in
     `io.TextIOWrapper`.
@@ -260,7 +310,7 @@ def writer(
         csi_depth=csi_depth,
     )
     try:
-        return io.TextIOWrapper(
+        return _TextWriter(
             raw,
             encoding=encoding,
             errors=errors,

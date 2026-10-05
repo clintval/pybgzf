@@ -264,6 +264,22 @@ struct Writer {
     closed: AtomicBool,
 }
 
+impl Writer {
+    fn end(
+        &self,
+        py: Python<'_>,
+        end: fn(&mut CoreWriter<Sink>) -> crate::Result<()>,
+    ) -> PyResult<()> {
+        py.detach(|| {
+            let mut inner = self.inner.lock()?;
+            let ended = end(&mut inner);
+            *inner.get_mut() = Sink::Closed;
+            self.closed.store(true, Ordering::Release);
+            ended.map_err(to_python)
+        })
+    }
+}
+
 #[pymethods]
 impl Writer {
     #[new]
@@ -355,13 +371,13 @@ impl Writer {
 
     /// Writes the end-of-file marker and the index, if any, once any call in progress returns.
     fn close(&self, py: Python<'_>) -> PyResult<()> {
-        py.detach(|| {
-            let mut inner = self.inner.lock()?;
-            let finished = inner.finish();
-            *inner.get_mut() = Sink::Closed;
-            self.closed.store(true, Ordering::Release);
-            finished.map_err(to_python)
-        })
+        self.end(py, CoreWriter::finish)
+    }
+
+    /// Ends the file without the end-of-file marker and removes the index, once any call in
+    /// progress returns.
+    fn abandon(&self, py: Python<'_>) -> PyResult<()> {
+        self.end(py, CoreWriter::abandon)
     }
 
     #[getter]

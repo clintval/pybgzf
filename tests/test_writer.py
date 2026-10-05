@@ -1,5 +1,6 @@
 import contextlib
 import csv
+import gc
 import gzip
 import io
 import os
@@ -547,13 +548,80 @@ def test_an_indexing_error_leaves_the_file_visibly_truncated(
     assert not Path(f"{path}.tbi").exists()
 
 
-def test_leaving_a_with_block_early_finishes_the_file(tmp_path: Path) -> None:
+def open_writer(
+    path: Path, index: IndexFormat | None, *, text: bool
+) -> BgzfWriter | io.TextIOWrapper:
+    columns = None if index is None else BED
+    if text:
+        return pybgzf.writer(path, index=index, columns=columns)
+    return BgzfWriter(path, index=index, columns=columns)
+
+
+def write_line(handle: BgzfWriter | io.TextIOWrapper, line: str) -> None:
+    if isinstance(handle, BgzfWriter):
+        handle.write(line.encode())
+    else:
+        handle.write(line)
+
+
+@pytest.mark.parametrize("index", [None, IndexFormat.TBI, IndexFormat.CSI])
+@pytest.mark.parametrize("text", [False, True], ids=["binary", "text"])
+def test_leaving_a_with_block_early_leaves_the_file_unfinished(
+    tmp_path: Path, index: IndexFormat | None, text: bool
+) -> None:
     path = tmp_path / "out.bed.gz"
-    with pytest.raises(RuntimeError), BgzfWriter(path, index=IndexFormat.TBI, columns=BED) as w:
-        w.write(b"chr1\t1\t2\n")
+    if index is not None:
+        Path(f"{path}.{index.name.lower()}").write_bytes(b"an index from an earlier run")
+    with pytest.raises(RuntimeError, match="failed partway"):
+        with open_writer(path, index, text=text) as handle:
+            write_line(handle, "chr1\t1\t2\n")
+            handle.flush()
+            raise RuntimeError("failed partway")
+    assert not path.read_bytes().endswith(EOF_MARKER)
+    assert list(tmp_path.iterdir()) == [path]
+    with pytest.warns(pybgzf.TruncatedWarning), pybgzf.reader(path) as handle:
+        assert handle.read() == "chr1\t1\t2\n"
+
+
+def test_leaving_a_with_block_early_leaves_a_stream_unfinished(tmp_path: Path) -> None:
+    buffer = io.BytesIO()
+    index_path = tmp_path / "stream.tbi"
+    index_path.write_bytes(b"an index from an earlier run")
+    with (
+        pytest.raises(RuntimeError),
+        BgzfWriter(buffer, index=IndexFormat.TBI, index_path=index_path, columns=BED) as writer,
+    ):
+        writer.write(b"chr1\t1\t2\n")
         raise RuntimeError
-    assert path.read_bytes().endswith(EOF_MARKER)
-    assert Path(f"{path}.tbi").exists()
+    assert gzip.decompress(buffer.getvalue()) == b"chr1\t1\t2\n"
+    assert not buffer.getvalue().endswith(EOF_MARKER)
+    assert not index_path.exists()
+
+
+@pytest.mark.parametrize("text", [False, True], ids=["binary", "text"])
+def test_every_other_way_of_closing_finishes_the_file(tmp_path: Path, text: bool) -> None:
+    data = bed_text()
+    outputs: list[tuple[bytes, bytes]] = []
+    for name in ("with", "close", "collected", "caught"):
+        path = tmp_path / f"{name}.bed.gz"
+        handle = open_writer(path, IndexFormat.TBI, text=text)
+        if name == "with":
+            with handle:
+                write_line(handle, data)
+        elif name == "caught":
+            with handle:
+                write_line(handle, data)
+                with contextlib.suppress(RuntimeError):
+                    raise RuntimeError
+        else:
+            write_line(handle, data)
+            if name == "close":
+                handle.close()
+            del handle
+            gc.collect()
+        outputs.append((path.read_bytes(), Path(f"{path}.tbi").read_bytes()))
+    assert outputs[0][0].endswith(EOF_MARKER)
+    assert all(output == outputs[0] for output in outputs)
 
 
 def test_open_writer_is_the_only_text_writer() -> None:
