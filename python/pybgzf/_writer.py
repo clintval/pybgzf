@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import codecs
+import contextlib
 import io
 import os
+import secrets
 import stat
 import threading
 from enum import Enum
+from types import TracebackType
 from typing import Any
 from typing import Protocol
 
@@ -53,6 +56,14 @@ def _is_regular_file(path: str) -> bool:
         return True
 
 
+def _is_replaceable(path: str) -> bool:
+    """Return True if `path` is a regular file, not a symbolic link to one, or does not exist."""
+    try:
+        return stat.S_ISREG(os.lstat(path).st_mode)
+    except FileNotFoundError:
+        return True
+
+
 def _suffix_columns(*names: str) -> Columns | None:
     for name in names:
         try:
@@ -73,7 +84,8 @@ class BgzfWriter(io.RawIOBase):
     file is left without the BGZF end-of-file marker, so that readers see it as truncated.
     The index file is also removed if writing fails.
     Otherwise closing, including leaving a `with` block because of an exception or the writer being
-    garbage collected, finishes the file and writes the index for what was written.
+    garbage collected, finishes the file and writes the index for what was written, unless
+    `atomic` is set.
     Threads sharing a writer take turns, as with the standard library's buffered files, so the
     bytes of each write stay together.
 
@@ -92,6 +104,14 @@ class BgzfWriter(io.RawIOBase):
         csi_min_shift: The width, as a power of two, of the smallest CSI bin; a small one with long
             features makes a large index, as in htslib.
         csi_depth: The number of CSI bin levels; None chooses as `tabix -C` does, but at most 9.
+        atomic: Write the file and its index under temporary names beside them, and rename both
+            into place on close, so that a write that fails leaves no file that looks complete
+            and keeps any earlier file and index as they were.
+            Leaving a `with` block because of an exception, an indexing or I/O error, or garbage
+            collection before `close()` removes the temporary files instead.
+            A `dest` that is not a regular file, such as a pipe, a device, a symbolic link like
+            `/dev/stdout`, or a file-like object, is written in place, and a write that fails
+            there is left without the end-of-file marker and without an index.
 
     Raises:
         ValueError: If the options are invalid, checked before anything is created.
@@ -109,9 +129,12 @@ class BgzfWriter(io.RawIOBase):
         columns: Columns | Infer | None = None,
         csi_min_shift: int = 14,
         csi_depth: int | None = None,
+        atomic: bool = False,
     ) -> None:
         super().__init__()
         self._closing: threading.RLock = threading.RLock()
+        self._atomic: bool = atomic
+        self._staged: list[tuple[str, str]] = []
         if isinstance(dest, (str, os.PathLike)):
             path: str | None = os.fspath(dest)
             sink: str | WritableBinary = os.fspath(dest)
@@ -148,18 +171,33 @@ class BgzfWriter(io.RawIOBase):
 
         self._columns: Columns | None = explicit
         self._name: object = path if path is not None else getattr(dest, "name", None)
-        self._inner: _pybgzf.Writer = _pybgzf.Writer(
-            sink,
-            level=level,
-            threads=threads,
-            index=None if index is None else index.value,
-            index_path=index_file,
-            columns=None if explicit is None or index is None else columns_to_tuple(explicit),
-            infer=infer and index is not None,
-            infer_bed=infer_bed and index is not None,
-            csi_min_shift=csi_min_shift,
-            csi_depth=csi_depth,
-        )
+        if atomic and path is not None and _is_replaceable(path):
+            token = secrets.token_hex(4)
+            sink = self._stage(path, token)
+            index_file = None if index_file is None else self._stage(index_file, token)
+        try:
+            self._inner: _pybgzf.Writer = _pybgzf.Writer(
+                sink,
+                level=level,
+                threads=threads,
+                index=None if index is None else index.value,
+                index_path=index_file,
+                columns=None if explicit is None or index is None else columns_to_tuple(explicit),
+                infer=infer and index is not None,
+                infer_bed=infer_bed and index is not None,
+                csi_min_shift=csi_min_shift,
+                csi_depth=csi_depth,
+            )
+        except BaseException:
+            self._end(keep=False)
+            raise
+
+    def _stage(self, path: str, token: str) -> str:
+        """Return a temporary name beside `path` to write to until the writer is closed."""
+        directory, name = os.path.split(path)
+        temporary = os.path.join(directory, f".{name}.{token}.tmp")
+        self._staged.append((temporary, path))
+        return temporary
 
     @property
     def name(self) -> object:
@@ -211,19 +249,92 @@ class BgzfWriter(io.RawIOBase):
 
         After an indexing error, the end-of-file marker and the index are not written.
         A file-like `dest` is flushed but not closed.
+        When `atomic` is set, the file and its index are then renamed into place, or removed if
+        they could not be finished.
 
         Raises:
             ValueError: If the last line cannot be indexed, or columns could not be inferred.
         """
+        self._end(keep=True)
+
+    def _abandon(self) -> None:
+        """Close without finishing the file, if it is written atomically."""
+        if self._atomic:
+            self._end(keep=False)
+
+    def _end(self, *, keep: bool) -> None:
         with self._closing:
             if self.closed:
                 return
             inner: _pybgzf.Writer | None = getattr(self, "_inner", None)
             try:
-                if inner is not None:
-                    inner.close()
+                if inner is None:
+                    return
+                if not keep:
+                    inner.abandon()
+                elif inner.close():
+                    for temporary, path in self._staged:
+                        os.replace(temporary, path)
             finally:
                 super().close()
+                for temporary, _ in self._staged:
+                    with contextlib.suppress(FileNotFoundError):
+                        os.remove(temporary)
+
+    @override
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_val: BaseException | None,
+        exc_tb: TracebackType | None,
+    ) -> None:
+        """Close, or abandon an atomic write if an exception is leaving the `with` block."""
+        if exc_type is not None:
+            self._abandon()
+        super().__exit__(exc_type, exc_val, exc_tb)
+
+    @override
+    def __del__(self) -> None:
+        """Abandon an atomic write that was never closed, or else close."""
+        self._abandon()
+        super().__del__()
+
+
+class _TextWriter(io.TextIOWrapper):
+    """Text over a `BgzfWriter`, which an exception or garbage collection does not finish."""
+
+    def __init__(
+        self,
+        raw: BgzfWriter,
+        *,
+        atomic: bool,
+        encoding: str,
+        errors: str | None,
+        newline: str,
+        write_through: bool,
+    ) -> None:
+        self._raw: BgzfWriter = raw
+        self._atomic: bool = atomic
+        super().__init__(
+            raw, encoding=encoding, errors=errors, newline=newline, write_through=write_through
+        )
+
+    @override
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_val: BaseException | None,
+        exc_tb: TracebackType | None,
+    ) -> None:
+        if exc_type is not None and self._atomic:
+            self._raw.__exit__(exc_type, exc_val, exc_tb)
+        super().__exit__(exc_type, exc_val, exc_tb)
+
+    @override
+    def __del__(self) -> None:
+        """Close, unless the write is atomic, which is abandoned when `raw` is collected."""
+        if not self._atomic:
+            super().__del__()
 
 
 def writer(
@@ -239,6 +350,7 @@ def writer(
     columns: Columns | Infer | None = None,
     csi_min_shift: int = 14,
     csi_depth: int | None = None,
+    atomic: bool = False,
 ) -> io.TextIOWrapper:
     """Open a BGZF file for writing text, so that `csv` and other text writers can write to it.
 
@@ -258,15 +370,17 @@ def writer(
         columns=columns,
         csi_min_shift=csi_min_shift,
         csi_depth=csi_depth,
+        atomic=atomic,
     )
     try:
-        return io.TextIOWrapper(
+        return _TextWriter(
             raw,
+            atomic=atomic,
             encoding=encoding,
             errors=errors,
             newline="\n" if newline is None else newline,
             write_through=index is not None,
         )
-    except BaseException:
-        raw.close()
+    except BaseException as error:
+        raw.__exit__(type(error), error, error.__traceback__)
         raise

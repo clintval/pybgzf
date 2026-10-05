@@ -1,5 +1,6 @@
 import contextlib
 import csv
+import gc
 import gzip
 import io
 import os
@@ -554,6 +555,233 @@ def test_leaving_a_with_block_early_finishes_the_file(tmp_path: Path) -> None:
         raise RuntimeError
     assert path.read_bytes().endswith(EOF_MARKER)
     assert Path(f"{path}.tbi").exists()
+
+
+def test_leaving_a_text_with_block_early_finishes_the_file(tmp_path: Path) -> None:
+    path = tmp_path / "out.bed.gz"
+    with pytest.raises(RuntimeError), pybgzf.writer(path) as handle:
+        handle.write("chr1\t1\t2\n")
+        raise RuntimeError
+    assert path.read_bytes().endswith(EOF_MARKER)
+    assert gzip.decompress(path.read_bytes()) == b"chr1\t1\t2\n"
+
+
+def open_writer(
+    path: Path, index: IndexFormat | None, *, text: bool, atomic: bool = True
+) -> BgzfWriter | io.TextIOWrapper:
+    columns = None if index is None else BED
+    if text:
+        return pybgzf.writer(path, index=index, columns=columns, atomic=atomic)
+    return BgzfWriter(path, index=index, columns=columns, atomic=atomic)
+
+
+def write_text(handle: BgzfWriter | io.TextIOWrapper, text: str) -> None:
+    if isinstance(handle, BgzfWriter):
+        handle.write(text.encode())
+    else:
+        handle.write(text)
+
+
+@pytest.mark.parametrize("index", [None, IndexFormat.TBI, IndexFormat.CSI])
+@pytest.mark.parametrize("text", [False, True], ids=["binary", "text"])
+def test_an_atomic_write_appears_on_close_as_a_plain_write_would(
+    tmp_path: Path, index: IndexFormat | None, text: bool
+) -> None:
+    data = bed_text()
+    paths = {atomic: tmp_path / str(atomic) / "out.bed.gz" for atomic in (False, True)}
+    for atomic, path in paths.items():
+        path.parent.mkdir()
+        with open_writer(path, index, text=text, atomic=atomic) as handle:
+            write_text(handle, data)
+            if atomic:
+                assert handle.name == str(path)
+                assert not path.exists()
+                staged = [file.name for file in path.parent.iterdir()]
+                assert len(staged) == (1 if index is None else 2)
+                assert all(name.startswith(".out.bed.gz") for name in staged)
+                assert all(name.endswith(".tmp") for name in staged)
+    plain, renamed = paths[False], paths[True]
+    assert renamed.read_bytes() == plain.read_bytes()
+    assert sorted(file.name for file in renamed.parent.iterdir()) == sorted(
+        file.name for file in plain.parent.iterdir()
+    )
+    if index is not None:
+        suffix = ".tbi" if index is IndexFormat.TBI else ".csi"
+        assert read_index(Path(f"{renamed}{suffix}")) == read_index(Path(f"{plain}{suffix}"))
+
+
+@pytest.mark.parametrize("index", [None, IndexFormat.TBI])
+@pytest.mark.parametrize("text", [False, True], ids=["binary", "text"])
+def test_an_exception_in_a_with_block_discards_an_atomic_write(
+    tmp_path: Path, index: IndexFormat | None, text: bool
+) -> None:
+    with pytest.raises(RuntimeError, match="failed partway"):
+        with open_writer(tmp_path / "out.bed.gz", index, text=text) as handle:
+            write_text(handle, bed_text())
+            raise RuntimeError("failed partway")
+    assert list(tmp_path.iterdir()) == []
+
+
+def fail_by_raising(path: Path) -> None:
+    with (
+        pytest.raises(RuntimeError),
+        BgzfWriter(path, index=IndexFormat.TBI, columns=BED, atomic=True) as w,
+    ):
+        w.write(b"chr2\t1\t2\n")
+        raise RuntimeError
+
+
+def fail_by_raising_in_text(path: Path) -> None:
+    with pytest.raises(RuntimeError):
+        with pybgzf.writer(path, index=IndexFormat.TBI, columns=BED, atomic=True) as handle:
+            handle.write("chr2\t1\t2\n")
+            raise RuntimeError
+
+
+def fail_to_index(path: Path) -> None:
+    with BgzfWriter(path, index=IndexFormat.TBI, columns=BED, atomic=True) as writer:
+        writer.write(b"chr2\t10\t20\n")
+        with pytest.raises(ValueError, match="not sorted"):
+            writer.write(b"chr2\t5\t6\n")
+
+
+def fail_to_infer(path: Path) -> None:
+    writer = BgzfWriter(path, index=IndexFormat.TBI, columns=INFER, atomic=True)
+    writer.write(b"# nothing but comments\n")
+    with pytest.raises(ValueError, match="no data lines"):
+        writer.close()
+
+
+def fail_to_close(path: Path) -> None:
+    writer = BgzfWriter(path, index=IndexFormat.TBI, columns=BED, atomic=True)
+    writer.write(b"chr2\t1\t2\n")
+    del writer
+    gc.collect()
+
+
+def fail_to_close_text(path: Path) -> None:
+    handle = pybgzf.writer(path, index=IndexFormat.TBI, columns=BED, atomic=True)
+    handle.write("chr2\t1\t2\n")
+    del handle
+    gc.collect()
+
+
+def fail_to_open_text(path: Path) -> None:
+    with pytest.raises(ValueError, match="illegal newline"):
+        pybgzf.writer(path, newline="\t", index=IndexFormat.TBI, columns=BED, atomic=True)
+
+
+@pytest.mark.parametrize(
+    "fail",
+    [
+        fail_by_raising,
+        fail_by_raising_in_text,
+        fail_to_index,
+        fail_to_infer,
+        fail_to_close,
+        fail_to_close_text,
+        fail_to_open_text,
+    ],
+)
+def test_a_failed_atomic_write_keeps_the_existing_file(
+    tmp_path: Path, fail: Callable[[Path], None]
+) -> None:
+    path = tmp_path / "out.bed.gz"
+    with pybgzf.writer(path, index=IndexFormat.TBI, columns=BED) as handle:
+        handle.write("chr1\t1\t2\n")
+    data, index = path.read_bytes(), Path(f"{path}.tbi").read_bytes()
+    fail(path)
+    assert sorted(file.name for file in tmp_path.iterdir()) == ["out.bed.gz", "out.bed.gz.tbi"]
+    assert path.read_bytes() == data
+    assert Path(f"{path}.tbi").read_bytes() == index
+
+
+def test_an_atomic_writer_that_cannot_be_created_leaves_nothing(tmp_path: Path) -> None:
+    index_path = tmp_path / "missing" / "out.tbi"
+    with pytest.raises(FileNotFoundError, match="missing"):
+        BgzfWriter(
+            tmp_path / "out.bed.gz",
+            index=IndexFormat.TBI,
+            index_path=index_path,
+            columns=BED,
+            atomic=True,
+        )
+    assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.parametrize("fails", [False, True], ids=["succeeds", "fails"])
+def test_an_atomic_write_to_a_file_object_is_written_in_place(tmp_path: Path, fails: bool) -> None:
+    buffer = io.BytesIO()
+    index_path = tmp_path / "stream.tbi"
+    index_path.write_bytes(b"an index from an earlier run")
+    with contextlib.suppress(RuntimeError):
+        with BgzfWriter(
+            buffer, index=IndexFormat.TBI, index_path=index_path, columns=BED, atomic=True
+        ) as writer:
+            writer.write(b"chr1\t1\t2\n")
+            if fails:
+                raise RuntimeError
+    assert gzip.decompress(buffer.getvalue()) == b"chr1\t1\t2\n"
+    assert buffer.getvalue().endswith(EOF_MARKER) is not fails
+    assert index_path.exists() is not fails
+    assert list(tmp_path.iterdir()) == ([] if fails else [index_path])
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="named pipes are not available")
+@pytest.mark.parametrize("fails", [False, True], ids=["succeeds", "fails"])
+def test_an_atomic_write_to_a_fifo_is_written_in_place(tmp_path: Path, fails: bool) -> None:
+    fifo = tmp_path / "features.bed.gz"
+    os.mkfifo(fifo)
+    index_path = tmp_path / "fifo.tbi"
+    reader, received = read_fifo_in_thread(fifo)
+    with contextlib.suppress(RuntimeError):
+        with pybgzf.writer(
+            fifo, index=IndexFormat.TBI, index_path=index_path, columns=BED, atomic=True
+        ) as handle:
+            handle.write("chr1\t1\t2\n")
+            handle.flush()
+            if fails:
+                raise RuntimeError
+    reader.join()
+    assert gzip.decompress(bytes(received)) == b"chr1\t1\t2\n"
+    assert bytes(received).endswith(EOF_MARKER) is not fails
+    assert index_path.exists() is not fails
+    assert sorted(file.name for file in tmp_path.iterdir()) == (
+        ["features.bed.gz"] if fails else ["features.bed.gz", "fifo.tbi"]
+    )
+
+
+@pytest.mark.parametrize("fails", [False, True], ids=["succeeds", "fails"])
+def test_an_atomic_write_through_a_symbolic_link_is_written_in_place(
+    tmp_path: Path, fails: bool
+) -> None:
+    target = tmp_path / "target.bed.gz"
+    target.write_bytes(b"old")
+    link = tmp_path / "link.bed.gz"
+    try:
+        link.symlink_to(target)
+    except OSError:
+        pytest.skip("symbolic links cannot be created here")
+    with contextlib.suppress(RuntimeError):
+        with BgzfWriter(link, index=IndexFormat.TBI, columns=BED, atomic=True) as writer:
+            writer.write(b"chr1\t1\t2\n")
+            if fails:
+                raise RuntimeError
+    assert link.is_symlink()
+    assert gzip.decompress(target.read_bytes()) == b"chr1\t1\t2\n"
+    assert target.read_bytes().endswith(EOF_MARKER) is not fails
+    assert Path(f"{link}.tbi").exists() is not fails
+    assert len(list(tmp_path.iterdir())) == (2 if fails else 3)
+
+
+@pytest.mark.skipif(not os.path.exists("/dev/null"), reason="/dev/null is not available")
+def test_an_atomic_write_to_a_device_is_written_in_place(tmp_path: Path) -> None:
+    index_path = tmp_path / "null.tbi"
+    with pybgzf.writer(
+        "/dev/null", index=IndexFormat.TBI, index_path=index_path, columns=BED, atomic=True
+    ) as handle:
+        handle.write("chr1\t1\t2\n")
+    assert list(tmp_path.iterdir()) == [index_path]
 
 
 def test_open_writer_is_the_only_text_writer() -> None:

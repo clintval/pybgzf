@@ -406,6 +406,7 @@ pub struct Writer<W: Write> {
     final_columns: Option<Columns>,
     io_failure: Option<String>,
     finished: bool,
+    complete: bool,
 }
 
 impl<W: Write> Writer<W> {
@@ -418,6 +419,7 @@ impl<W: Write> Writer<W> {
             final_columns: None,
             io_failure: None,
             finished: false,
+            complete: false,
         })
     }
 
@@ -530,6 +532,11 @@ impl<W: Write> Writer<W> {
         self.finished
     }
 
+    /// Returns true once the writer has written the end-of-file marker and the index, if any.
+    pub fn is_complete(&self) -> bool {
+        self.complete
+    }
+
     /// Writes the end-of-file marker and then the index, if one was requested.
     ///
     /// After an indexing error, the data is written without the end-of-file marker, so that
@@ -543,11 +550,16 @@ impl<W: Write> Writer<W> {
         self.finished = true;
         let Some(mut indexer) = self.indexer.take() else {
             self.check_io()?;
-            return self.blocks.finish(true).map(drop).map_err(Error::Io);
+            self.blocks.finish(true)?;
+            self.complete = true;
+            return Ok(());
         };
         let reported = indexer.failure.is_some();
         match self.finish_indexed(&mut indexer) {
-            Ok(()) => Ok(()),
+            Ok(()) => {
+                self.complete = true;
+                Ok(())
+            }
             Err(error) => {
                 indexer.remove_file()?;
                 match error {
@@ -555,6 +567,24 @@ impl<W: Write> Writer<W> {
                     error => Err(error),
                 }
             }
+        }
+    }
+
+    /// Writes what remains without the end-of-file marker, so that readers see the file as
+    /// truncated, and removes the index file.
+    ///
+    /// Errors writing what remains are not reported, since the file is being abandoned.
+    pub fn abandon(&mut self) -> Result<()> {
+        if self.finished {
+            return Ok(());
+        }
+        self.finished = true;
+        if self.io_failure.is_none() {
+            drop(self.blocks.finish(false));
+        }
+        match self.indexer.take() {
+            Some(mut indexer) => indexer.remove_file().map_err(Error::Io),
+            None => Ok(()),
         }
     }
 
@@ -643,6 +673,50 @@ mod tests {
         writer.write(b"hello\nworld").unwrap();
         writer.finish().unwrap();
         assert_eq!(decompress(writer.get_ref()), b"hello\nworld");
+    }
+
+    #[test]
+    fn finishing_completes_the_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let options = options(&dir, IndexFormat::Tabix, Some(Columns::bed()));
+        let mut writer = Writer::new(Vec::new(), 6, 1, Some(options)).unwrap();
+        writer.write(b"chr1\t1\t2\n").unwrap();
+        assert!(!writer.is_complete());
+        writer.finish().unwrap();
+        assert!(writer.is_complete());
+        assert!(writer.abandon().is_ok());
+        assert!(dir.path().join("out.bed.gz.idx").exists());
+    }
+
+    #[test]
+    fn abandoning_leaves_no_eof_marker_and_removes_the_index() {
+        for threads in [1, 3] {
+            let dir = tempfile::tempdir().unwrap();
+            let options = options(&dir, IndexFormat::Tabix, Some(Columns::bed()));
+            let mut writer = Writer::new(Vec::new(), 6, threads, Some(options)).unwrap();
+            writer.write(b"chr1\t1\t2\n").unwrap();
+            writer.abandon().unwrap();
+            assert!(!writer.is_complete());
+            assert!(writer.is_finished());
+            writer.finish().unwrap();
+            assert!(!writer.is_complete());
+            let mut marker = Vec::new();
+            bgzf::Compressor::append_eof(&mut marker);
+            assert!(!writer.get_ref().ends_with(&marker), "threads={threads}");
+            assert_eq!(decompress(writer.get_ref()), b"chr1\t1\t2\n");
+            assert!(!dir.path().join("out.bed.gz.idx").exists());
+        }
+    }
+
+    #[test]
+    fn an_indexing_error_leaves_the_file_incomplete() {
+        let dir = tempfile::tempdir().unwrap();
+        let options = options(&dir, IndexFormat::Tabix, Some(Columns::bed()));
+        let mut writer = Writer::new(Vec::new(), 6, 1, Some(options)).unwrap();
+        writer.write(b"chr1\t10\t20\n").unwrap();
+        assert!(writer.write(b"chr1\t5\t20\n").is_err());
+        writer.finish().unwrap();
+        assert!(!writer.is_complete());
     }
 
     #[test]
