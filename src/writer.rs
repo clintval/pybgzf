@@ -558,6 +558,24 @@ impl<W: Write> Writer<W> {
         }
     }
 
+    /// Writes what remains without the end-of-file marker, so that readers see the file as
+    /// truncated, and removes the index file.
+    ///
+    /// Errors writing what remains are not reported, since the file is being abandoned.
+    pub fn abandon(&mut self) -> Result<()> {
+        if self.finished {
+            return Ok(());
+        }
+        self.finished = true;
+        if self.io_failure.is_none() {
+            drop(self.blocks.finish(false));
+        }
+        match self.indexer.take() {
+            Some(mut indexer) => indexer.remove_file().map_err(Error::Io),
+            None => Ok(()),
+        }
+    }
+
     fn finish_indexed(&mut self, indexer: &mut Indexer) -> Result<()> {
         self.check_io()?;
         if indexer.failure.is_none() && !indexer.partial.is_empty() {
@@ -643,6 +661,25 @@ mod tests {
         writer.write(b"hello\nworld").unwrap();
         writer.finish().unwrap();
         assert_eq!(decompress(writer.get_ref()), b"hello\nworld");
+    }
+
+    #[test]
+    fn abandoning_leaves_no_eof_marker_and_removes_the_index() {
+        for threads in [1, 3] {
+            let dir = tempfile::tempdir().unwrap();
+            let index = dir.path().join("out.bed.gz.idx");
+            fs::write(&index, b"an index from an earlier run").unwrap();
+            let options = options(&dir, IndexFormat::Tabix, Some(Columns::bed()));
+            let mut writer = Writer::new(Vec::new(), 6, threads, Some(options)).unwrap();
+            writer.write(b"chr1\t1\t2\n").unwrap();
+            writer.abandon().unwrap();
+            writer.finish().unwrap();
+            let mut marker = Vec::new();
+            bgzf::Compressor::append_eof(&mut marker);
+            assert!(!writer.get_ref().ends_with(&marker), "threads={threads}");
+            assert_eq!(decompress(writer.get_ref()), b"chr1\t1\t2\n");
+            assert!(!index.exists(), "threads={threads}");
+        }
     }
 
     #[test]
