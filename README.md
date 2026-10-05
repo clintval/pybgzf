@@ -54,11 +54,12 @@ True
 
 ```
 
-Pass `atomic=True` to write under temporary names and rename the file and its index into place on close, so a run that fails partway leaves no file that looks complete and keeps the earlier one.
-Destinations that are not regular files, such as `/dev/stdout`, are written in place:
+Writes are atomic: the file and its index are written under hidden temporary names and renamed into place on close, so a run that fails partway leaves no file that looks complete and keeps the earlier one.
+This needs room for the old and new file at once, the file is not visible until it is finished, and a process killed outright can leave a hidden `.tmp` file beside it.
+Pass `atomic=False` to write in place; destinations that are not regular files, such as `/dev/stdout`, are always written in place:
 
 ```python
->>> with pybgzf.writer(path, atomic=True, index=IndexFormat.TBI, columns=Columns.BED) as handle:
+>>> with pybgzf.writer(path, index=IndexFormat.TBI, columns=Columns.BED) as handle:
 ...     _ = handle.write("chr1\t100\t200\tgene-a\n")
 ...     raise RuntimeError("the run failed")
 Traceback (most recent call last):

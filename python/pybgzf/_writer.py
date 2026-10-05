@@ -57,7 +57,12 @@ def _is_regular_file(path: str) -> bool:
 
 
 def _is_replaceable(path: str) -> bool:
-    """Return True if `path` is a regular file, not a symbolic link to one, or does not exist."""
+    """Return True if `path` is a regular file, not a link or a descriptor, or does not exist.
+
+    On macOS, `/dev/fd/1` looks like a regular file when standard output is redirected to one.
+    """
+    if os.path.dirname(os.path.abspath(path)) == "/dev/fd":
+        return False
     try:
         return stat.S_ISREG(os.lstat(path).st_mode)
     except FileNotFoundError:
@@ -79,13 +84,24 @@ class BgzfWriter(io.RawIOBase):
     When `index` is set, every complete line is parsed with `columns` and added to a tabix or CSI
     index, which is written to `index_path` on close.
     Lines must be sorted by start within each reference, and each reference must be contiguous.
-    The index file is created, empty, with the writer and written on close.
-    If a line cannot be indexed, or columns cannot be inferred, the index file is removed and the
-    file is left without the BGZF end-of-file marker, so that readers see it as truncated.
-    The index file is also removed if writing fails.
-    Otherwise closing, including leaving a `with` block because of an exception or the writer being
-    garbage collected, finishes the file and writes the index for what was written, unless
-    `atomic` is set.
+
+    A path is written atomically by default: the file and its index are written under hidden
+    temporary names beside them and renamed into place on close.
+    If the write fails, because an exception leaves a `with` block, a line cannot be indexed,
+    columns cannot be inferred, I/O fails, or the writer is garbage collected before `close()`,
+    the temporary files are removed instead and any earlier file and index are kept.
+    This needs room for the old and new file at once, the file is not visible until it is
+    finished, and a process killed outright can leave a hidden `.tmp` file beside it.
+
+    Otherwise the file is written in place: with `atomic=False`, or when `dest` is not a regular
+    file, such as a pipe, a device, a symbolic link like `/dev/stdout`, a descriptor like
+    `/dev/fd/1`, or a file-like object.
+    The index file is then created, empty, with the writer.
+    If the write fails, the index file is removed and the file is left without the BGZF
+    end-of-file marker, so that readers see it as truncated; but with `atomic=False`, an exception
+    leaving a `with` block, or garbage collection, finishes the file and writes the index for what
+    was written, as closing does.
+
     Threads sharing a writer take turns, as with the standard library's buffered files, so the
     bytes of each write stay together.
 
@@ -104,14 +120,8 @@ class BgzfWriter(io.RawIOBase):
         csi_min_shift: The width, as a power of two, of the smallest CSI bin; a small one with long
             features makes a large index, as in htslib.
         csi_depth: The number of CSI bin levels; None chooses as `tabix -C` does, but at most 9.
-        atomic: Write the file and its index under temporary names beside them, and rename both
-            into place on close, so that a write that fails leaves no file that looks complete
-            and keeps any earlier file and index as they were.
-            Leaving a `with` block because of an exception, an indexing or I/O error, or garbage
-            collection before `close()` removes the temporary files instead.
-            A `dest` that is not a regular file, such as a pipe, a device, a symbolic link like
-            `/dev/stdout`, or a file-like object, is written in place, and a write that fails
-            there is left without the end-of-file marker and without an index.
+        atomic: Write a path that is, or will be, a regular file atomically, as described
+            above; False writes it in place.
 
     Raises:
         ValueError: If the options are invalid, checked before anything is created.
@@ -129,7 +139,7 @@ class BgzfWriter(io.RawIOBase):
         columns: Columns | Infer | None = None,
         csi_min_shift: int = 14,
         csi_depth: int | None = None,
-        atomic: bool = False,
+        atomic: bool = True,
     ) -> None:
         super().__init__()
         self._closing: threading.RLock = threading.RLock()
@@ -249,8 +259,8 @@ class BgzfWriter(io.RawIOBase):
 
         After an indexing error, the end-of-file marker and the index are not written.
         A file-like `dest` is flushed but not closed.
-        When `atomic` is set, the file and its index are then renamed into place, or removed if
-        they could not be finished.
+        When a path is written atomically, the file and its index are then renamed into place, or
+        removed if they could not be finished.
 
         Raises:
             ValueError: If the last line cannot be indexed, or columns could not be inferred.
@@ -350,7 +360,7 @@ def writer(
     columns: Columns | Infer | None = None,
     csi_min_shift: int = 14,
     csi_depth: int | None = None,
-    atomic: bool = False,
+    atomic: bool = True,
 ) -> io.TextIOWrapper:
     """Open a BGZF file for writing text, so that `csv` and other text writers can write to it.
 

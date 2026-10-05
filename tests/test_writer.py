@@ -111,7 +111,7 @@ def test_tell_returns_virtual_offsets(tmp_path: Path) -> None:
 
 def test_flush_ends_the_block(tmp_path: Path) -> None:
     path = tmp_path / "out.gz"
-    with BgzfWriter(path) as writer:
+    with BgzfWriter(path, atomic=False) as writer:
         writer.write(b"abc")
         writer.flush()
         assert writer.tell() == len(path.read_bytes()) << 16
@@ -265,7 +265,7 @@ def test_csv_writer(tmp_path: Path) -> None:
 
 def test_unsorted_records_raise_at_write_naming_the_line(tmp_path: Path) -> None:
     path = tmp_path / "out.bed.gz"
-    with BgzfWriter(path, index=IndexFormat.TBI, columns=Columns.BED) as writer:
+    with BgzfWriter(path, index=IndexFormat.TBI, columns=Columns.BED, atomic=False) as writer:
         writer.write(b"#header\nchr1\t100\t200\n")
         with pytest.raises(ValueError, match=r"^line 3: records are not sorted"):
             writer.write(b"chr1\t50\t60\n")
@@ -275,11 +275,11 @@ def test_unsorted_records_raise_at_write_naming_the_line(tmp_path: Path) -> None
     assert not Path(f"{path}.tbi").exists()
 
 
-def test_a_failed_write_removes_a_stale_index(tmp_path: Path) -> None:
+def test_a_failed_write_in_place_removes_a_stale_index(tmp_path: Path) -> None:
     path = tmp_path / "out.bed.gz"
     Path(f"{path}.tbi").write_bytes(b"stale")
     with pytest.raises(ValueError, match="not contiguous"):
-        with BgzfWriter(path, index=IndexFormat.TBI, columns=Columns.BED) as writer:
+        with BgzfWriter(path, index=IndexFormat.TBI, columns=Columns.BED, atomic=False) as writer:
             writer.write(b"chr1\t1\t2\nchr2\t1\t2\nchr1\t3\t4\n")
     assert not Path(f"{path}.tbi").exists()
 
@@ -402,7 +402,7 @@ def test_ambiguous_content_raises(tmp_path: Path) -> None:
 
 
 def test_inference_without_data_raises_at_close(tmp_path: Path) -> None:
-    writer = BgzfWriter(tmp_path / "stream", index=IndexFormat.TBI, columns=INFER)
+    writer = BgzfWriter(tmp_path / "stream", index=IndexFormat.TBI, columns=INFER, atomic=False)
     writer.write(b"# nothing but comments\n")
     with pytest.raises(ValueError, match="no data lines"):
         writer.close()
@@ -533,11 +533,11 @@ EOF_MARKER = bytes.fromhex("1f8b08040000000000ff0600424302001b000300000000000000
     ids=["unsorted", "unterminated", "uninferred"],
 )
 @pytest.mark.parametrize("threads", [1, 3])
-def test_an_indexing_error_leaves_the_file_visibly_truncated(
+def test_an_indexing_error_in_place_leaves_the_file_visibly_truncated(
     tmp_path: Path, data: bytes, columns: Columns | Infer, threads: int
 ) -> None:
     path = tmp_path / "out.bed.gz"
-    writer = BgzfWriter(path, threads=threads, index=IndexFormat.TBI, columns=columns)
+    writer = BgzfWriter(path, threads=threads, index=IndexFormat.TBI, columns=columns, atomic=False)
     with pytest.raises(ValueError):
         writer.write(data)
         writer.close()
@@ -548,18 +548,21 @@ def test_an_indexing_error_leaves_the_file_visibly_truncated(
     assert not Path(f"{path}.tbi").exists()
 
 
-def test_leaving_a_with_block_early_finishes_the_file(tmp_path: Path) -> None:
+def test_leaving_a_with_block_early_finishes_a_file_written_in_place(tmp_path: Path) -> None:
     path = tmp_path / "out.bed.gz"
-    with pytest.raises(RuntimeError), BgzfWriter(path, index=IndexFormat.TBI, columns=BED) as w:
+    with (
+        pytest.raises(RuntimeError),
+        BgzfWriter(path, index=IndexFormat.TBI, columns=BED, atomic=False) as w,
+    ):
         w.write(b"chr1\t1\t2\n")
         raise RuntimeError
     assert path.read_bytes().endswith(EOF_MARKER)
     assert Path(f"{path}.tbi").exists()
 
 
-def test_leaving_a_text_with_block_early_finishes_the_file(tmp_path: Path) -> None:
+def test_leaving_a_text_with_block_early_finishes_a_file_written_in_place(tmp_path: Path) -> None:
     path = tmp_path / "out.bed.gz"
-    with pytest.raises(RuntimeError), pybgzf.writer(path) as handle:
+    with pytest.raises(RuntimeError), pybgzf.writer(path, atomic=False) as handle:
         handle.write("chr1\t1\t2\n")
         raise RuntimeError
     assert path.read_bytes().endswith(EOF_MARKER)
@@ -567,12 +570,16 @@ def test_leaving_a_text_with_block_early_finishes_the_file(tmp_path: Path) -> No
 
 
 def open_writer(
-    path: Path, index: IndexFormat | None, *, text: bool, atomic: bool = True
+    path: Path, index: IndexFormat | None, *, text: bool, in_place: bool = False
 ) -> BgzfWriter | io.TextIOWrapper:
     columns = None if index is None else BED
+    if in_place:
+        if text:
+            return pybgzf.writer(path, index=index, columns=columns, atomic=False)
+        return BgzfWriter(path, index=index, columns=columns, atomic=False)
     if text:
-        return pybgzf.writer(path, index=index, columns=columns, atomic=atomic)
-    return BgzfWriter(path, index=index, columns=columns, atomic=atomic)
+        return pybgzf.writer(path, index=index, columns=columns)
+    return BgzfWriter(path, index=index, columns=columns)
 
 
 def write_text(handle: BgzfWriter | io.TextIOWrapper, text: str) -> None:
@@ -584,23 +591,23 @@ def write_text(handle: BgzfWriter | io.TextIOWrapper, text: str) -> None:
 
 @pytest.mark.parametrize("index", [None, IndexFormat.TBI, IndexFormat.CSI])
 @pytest.mark.parametrize("text", [False, True], ids=["binary", "text"])
-def test_an_atomic_write_appears_on_close_as_a_plain_write_would(
+def test_a_write_appears_on_close_as_a_write_in_place_would(
     tmp_path: Path, index: IndexFormat | None, text: bool
 ) -> None:
     data = bed_text()
-    paths = {atomic: tmp_path / str(atomic) / "out.bed.gz" for atomic in (False, True)}
-    for atomic, path in paths.items():
+    paths = {in_place: tmp_path / str(in_place) / "out.bed.gz" for in_place in (True, False)}
+    for in_place, path in paths.items():
         path.parent.mkdir()
-        with open_writer(path, index, text=text, atomic=atomic) as handle:
+        with open_writer(path, index, text=text, in_place=in_place) as handle:
             write_text(handle, data)
-            if atomic:
+            if not in_place:
                 assert handle.name == str(path)
                 assert not path.exists()
                 staged = [file.name for file in path.parent.iterdir()]
                 assert len(staged) == (1 if index is None else 2)
                 assert all(name.startswith(".out.bed.gz") for name in staged)
                 assert all(name.endswith(".tmp") for name in staged)
-    plain, renamed = paths[False], paths[True]
+    plain, renamed = paths[True], paths[False]
     assert renamed.read_bytes() == plain.read_bytes()
     assert sorted(file.name for file in renamed.parent.iterdir()) == sorted(
         file.name for file in plain.parent.iterdir()
@@ -612,7 +619,7 @@ def test_an_atomic_write_appears_on_close_as_a_plain_write_would(
 
 @pytest.mark.parametrize("index", [None, IndexFormat.TBI])
 @pytest.mark.parametrize("text", [False, True], ids=["binary", "text"])
-def test_an_exception_in_a_with_block_discards_an_atomic_write(
+def test_an_exception_in_a_with_block_leaves_nothing(
     tmp_path: Path, index: IndexFormat | None, text: bool
 ) -> None:
     with pytest.raises(RuntimeError, match="failed partway"):
@@ -625,7 +632,7 @@ def test_an_exception_in_a_with_block_discards_an_atomic_write(
 def fail_by_raising(path: Path) -> None:
     with (
         pytest.raises(RuntimeError),
-        BgzfWriter(path, index=IndexFormat.TBI, columns=BED, atomic=True) as w,
+        BgzfWriter(path, index=IndexFormat.TBI, columns=BED) as w,
     ):
         w.write(b"chr2\t1\t2\n")
         raise RuntimeError
@@ -633,34 +640,34 @@ def fail_by_raising(path: Path) -> None:
 
 def fail_by_raising_in_text(path: Path) -> None:
     with pytest.raises(RuntimeError):
-        with pybgzf.writer(path, index=IndexFormat.TBI, columns=BED, atomic=True) as handle:
+        with pybgzf.writer(path, index=IndexFormat.TBI, columns=BED) as handle:
             handle.write("chr2\t1\t2\n")
             raise RuntimeError
 
 
 def fail_to_index(path: Path) -> None:
-    with BgzfWriter(path, index=IndexFormat.TBI, columns=BED, atomic=True) as writer:
+    with BgzfWriter(path, index=IndexFormat.TBI, columns=BED) as writer:
         writer.write(b"chr2\t10\t20\n")
         with pytest.raises(ValueError, match="not sorted"):
             writer.write(b"chr2\t5\t6\n")
 
 
 def fail_to_infer(path: Path) -> None:
-    writer = BgzfWriter(path, index=IndexFormat.TBI, columns=INFER, atomic=True)
+    writer = BgzfWriter(path, index=IndexFormat.TBI, columns=INFER)
     writer.write(b"# nothing but comments\n")
     with pytest.raises(ValueError, match="no data lines"):
         writer.close()
 
 
 def fail_to_close(path: Path) -> None:
-    writer = BgzfWriter(path, index=IndexFormat.TBI, columns=BED, atomic=True)
+    writer = BgzfWriter(path, index=IndexFormat.TBI, columns=BED)
     writer.write(b"chr2\t1\t2\n")
     del writer
     gc.collect()
 
 
 def fail_to_close_text(path: Path) -> None:
-    handle = pybgzf.writer(path, index=IndexFormat.TBI, columns=BED, atomic=True)
+    handle = pybgzf.writer(path, index=IndexFormat.TBI, columns=BED)
     handle.write("chr2\t1\t2\n")
     del handle
     gc.collect()
@@ -668,7 +675,7 @@ def fail_to_close_text(path: Path) -> None:
 
 def fail_to_open_text(path: Path) -> None:
     with pytest.raises(ValueError, match="illegal newline"):
-        pybgzf.writer(path, newline="\t", index=IndexFormat.TBI, columns=BED, atomic=True)
+        pybgzf.writer(path, newline="\t", index=IndexFormat.TBI, columns=BED)
 
 
 @pytest.mark.parametrize(
@@ -683,7 +690,7 @@ def fail_to_open_text(path: Path) -> None:
         fail_to_open_text,
     ],
 )
-def test_a_failed_atomic_write_keeps_the_existing_file(
+def test_a_failed_write_keeps_the_existing_file(
     tmp_path: Path, fail: Callable[[Path], None]
 ) -> None:
     path = tmp_path / "out.bed.gz"
@@ -696,7 +703,7 @@ def test_a_failed_atomic_write_keeps_the_existing_file(
     assert Path(f"{path}.tbi").read_bytes() == index
 
 
-def test_an_atomic_writer_that_cannot_be_created_leaves_nothing(tmp_path: Path) -> None:
+def test_a_writer_that_cannot_be_created_leaves_no_temporary_file(tmp_path: Path) -> None:
     index_path = tmp_path / "missing" / "out.tbi"
     with pytest.raises(FileNotFoundError, match="missing"):
         BgzfWriter(
@@ -704,19 +711,18 @@ def test_an_atomic_writer_that_cannot_be_created_leaves_nothing(tmp_path: Path) 
             index=IndexFormat.TBI,
             index_path=index_path,
             columns=BED,
-            atomic=True,
         )
     assert list(tmp_path.iterdir()) == []
 
 
 @pytest.mark.parametrize("fails", [False, True], ids=["succeeds", "fails"])
-def test_an_atomic_write_to_a_file_object_is_written_in_place(tmp_path: Path, fails: bool) -> None:
+def test_a_file_object_is_written_in_place(tmp_path: Path, fails: bool) -> None:
     buffer = io.BytesIO()
     index_path = tmp_path / "stream.tbi"
     index_path.write_bytes(b"an index from an earlier run")
     with contextlib.suppress(RuntimeError):
         with BgzfWriter(
-            buffer, index=IndexFormat.TBI, index_path=index_path, columns=BED, atomic=True
+            buffer, index=IndexFormat.TBI, index_path=index_path, columns=BED
         ) as writer:
             writer.write(b"chr1\t1\t2\n")
             if fails:
@@ -729,14 +735,14 @@ def test_an_atomic_write_to_a_file_object_is_written_in_place(tmp_path: Path, fa
 
 @pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="named pipes are not available")
 @pytest.mark.parametrize("fails", [False, True], ids=["succeeds", "fails"])
-def test_an_atomic_write_to_a_fifo_is_written_in_place(tmp_path: Path, fails: bool) -> None:
+def test_a_fifo_is_written_in_place(tmp_path: Path, fails: bool) -> None:
     fifo = tmp_path / "features.bed.gz"
     os.mkfifo(fifo)
     index_path = tmp_path / "fifo.tbi"
     reader, received = read_fifo_in_thread(fifo)
     with contextlib.suppress(RuntimeError):
         with pybgzf.writer(
-            fifo, index=IndexFormat.TBI, index_path=index_path, columns=BED, atomic=True
+            fifo, index=IndexFormat.TBI, index_path=index_path, columns=BED
         ) as handle:
             handle.write("chr1\t1\t2\n")
             handle.flush()
@@ -752,9 +758,7 @@ def test_an_atomic_write_to_a_fifo_is_written_in_place(tmp_path: Path, fails: bo
 
 
 @pytest.mark.parametrize("fails", [False, True], ids=["succeeds", "fails"])
-def test_an_atomic_write_through_a_symbolic_link_is_written_in_place(
-    tmp_path: Path, fails: bool
-) -> None:
+def test_a_symbolic_link_is_written_through_in_place(tmp_path: Path, fails: bool) -> None:
     target = tmp_path / "target.bed.gz"
     target.write_bytes(b"old")
     link = tmp_path / "link.bed.gz"
@@ -763,7 +767,7 @@ def test_an_atomic_write_through_a_symbolic_link_is_written_in_place(
     except OSError:
         pytest.skip("symbolic links cannot be created here")
     with contextlib.suppress(RuntimeError):
-        with BgzfWriter(link, index=IndexFormat.TBI, columns=BED, atomic=True) as writer:
+        with BgzfWriter(link, index=IndexFormat.TBI, columns=BED) as writer:
             writer.write(b"chr1\t1\t2\n")
             if fails:
                 raise RuntimeError
@@ -775,13 +779,22 @@ def test_an_atomic_write_through_a_symbolic_link_is_written_in_place(
 
 
 @pytest.mark.skipif(not os.path.exists("/dev/null"), reason="/dev/null is not available")
-def test_an_atomic_write_to_a_device_is_written_in_place(tmp_path: Path) -> None:
+def test_a_device_is_written_in_place(tmp_path: Path) -> None:
     index_path = tmp_path / "null.tbi"
     with pybgzf.writer(
-        "/dev/null", index=IndexFormat.TBI, index_path=index_path, columns=BED, atomic=True
+        "/dev/null", index=IndexFormat.TBI, index_path=index_path, columns=BED
     ) as handle:
         handle.write("chr1\t1\t2\n")
     assert list(tmp_path.iterdir()) == [index_path]
+
+
+@pytest.mark.skipif(not os.path.isdir("/dev/fd"), reason="/dev/fd is not available")
+def test_a_descriptor_of_a_regular_file_is_written_in_place(tmp_path: Path) -> None:
+    target = tmp_path / "target.bed.gz"
+    with target.open("wb") as file, pybgzf.writer(f"/dev/fd/{file.fileno()}") as handle:
+        handle.write("chr1\t1\t2\n")
+    assert gzip.decompress(target.read_bytes()) == b"chr1\t1\t2\n"
+    assert list(tmp_path.iterdir()) == [target]
 
 
 def test_open_writer_is_the_only_text_writer() -> None:
