@@ -24,60 +24,59 @@ It needs neither pysam nor htslib.
 Write sorted BED lines as text and the index appears next to the file on close:
 
 ```python
->>> from pathlib import Path
->>> from tempfile import mkdtemp
->>>
->>> import pybgzf
->>> from pybgzf import Columns, IndexFormat
->>>
->>> directory = Path(mkdtemp())
->>> path = directory / "features.bed.gz"
->>>
->>> with pybgzf.writer(path, index=IndexFormat.TBI, columns=Columns.BED) as handle:
-...     _ = handle.write("chr1\t100\t200\tgene-a\n")
-...     _ = handle.write("chr1\t150\t300\tgene-b\n")
-...     _ = handle.write("chr2\t10\t20\tgene-c\n")
->>>
->>> sorted(file.name for file in directory.iterdir())
-['features.bed.gz', 'features.bed.gz.tbi']
+from pathlib import Path
+from tempfile import mkdtemp
 
+import pybgzf
+from pybgzf import Columns, IndexFormat
+
+directory = Path(mkdtemp())
+path = directory / "features.bed.gz"
+
+with pybgzf.writer(path, index=IndexFormat.TBI, columns=Columns.BED) as handle:
+    handle.write("chr1\t100\t200\tgene-a\n")
+    handle.write("chr1\t150\t300\tgene-b\n")
+    handle.write("chr2\t10\t20\tgene-c\n")
+
+files = sorted(file.name for file in directory.iterdir())
+
+assert files == ["features.bed.gz", "features.bed.gz.tbi"]
 ```
 
 The output is ordinary BGZF, so `gzip -d`, `bgzip -d`, and `tabix features.bed.gz chr1:120-160` all read it.
 `pybgzf.BGZF_SUFFIXES` holds the file name suffixes of BGZF files, for deciding when to write one:
 
 ```python
->>> pybgzf.BGZF_SUFFIXES
-('.gz', '.bgz', '.bgzf')
->>> path.name.endswith(pybgzf.BGZF_SUFFIXES)
-True
-
+assert pybgzf.BGZF_SUFFIXES == (".gz", ".bgz", ".bgzf")
+assert path.name.endswith(pybgzf.BGZF_SUFFIXES)
 ```
 
 Stream bytes to a pipe or any binary file object, with columns inferred from the content:
 
 ```python
->>> import io
->>>
->>> stream = io.BytesIO()
->>> with pybgzf.BgzfWriter(stream, threads=4, index=IndexFormat.CSI, index_path=directory / "calls.csi", columns=pybgzf.INFER) as writer:
-...     _ = writer.write(b"##fileformat=VCFv4.3\n")
-...     writer.columns == Columns.VCF
-True
+import io
 
+stream = io.BytesIO()
+
+with pybgzf.BgzfWriter(stream, threads=4, index=IndexFormat.CSI, index_path=directory / "calls.csi", columns=pybgzf.INFER) as writer:
+    writer.write(b"##fileformat=VCFv4.3\n")
+    columns = writer.columns
+
+assert columns == Columns.VCF
 ```
 
 Read the BED file back on several threads, or query a region with 0-based, half-open coordinates:
 
 ```python
->>> with pybgzf.reader(path, threads=4) as handle:
-...     handle.readline()
-'chr1\t100\t200\tgene-a\n'
+with pybgzf.reader(path, threads=4) as handle:
+    line = handle.readline()
 
->>> with pybgzf.IndexedReader(path) as reader:
-...     list(reader.query("chr1", 180, 190))
-['chr1\t100\t200\tgene-a', 'chr1\t150\t300\tgene-b']
+assert line == "chr1\t100\t200\tgene-a\n"
 
+with pybgzf.IndexedReader(path) as reader:
+    lines = list(reader.query("chr1", 180, 190))
+
+assert lines == ["chr1\t100\t200\tgene-a", "chr1\t150\t300\tgene-b"]
 ```
 
 ## Development and Testing
