@@ -607,8 +607,8 @@ dev = [
     { name = "poethepoet" },
     { name = "pytest" },
     { name = "pytest-cov" },
-    { name = "pytest-doctestplus" },
     { name = "ruff" },
+    { name = "sybil", extra = ["pytest"] },
     { name = "ty" },
     { name = "validate-pyproject", extra = ["all"] },
 ]
@@ -625,8 +625,8 @@ dev = [
     { name = "poethepoet", specifier = "~=0.48" },
     { name = "pytest", specifier = "~=9.1" },
     { name = "pytest-cov", specifier = "~=7.1" },
-    { name = "pytest-doctestplus", specifier = "~=1.7" },
     { name = "ruff", specifier = "~=0.16" },
+    { name = "sybil", extras = ["pytest"], specifier = "~=10.1" },
     { name = "ty", specifier = "~=0.0.83" },
     { name = "validate-pyproject", extras = ["all"], specifier = "~=0.26" },
 ]
@@ -668,19 +668,6 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/b1/51/a849f96e117386044471c8ec2bd6cfebacda285da9525c9106aeb28da671/pytest_cov-7.1.0.tar.gz", hash = "sha256:30674f2b5f6351aa09702a9c8c364f6a01c27aae0c1366ae8016160d1efc56b2", size = 55592, upload-time = "2026-03-21T20:11:16.284Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/9d/7a/d968e294073affff457b041c2be9868a40c1c71f4a35fcc1e45e5493067b/pytest_cov-7.1.0-py3-none-any.whl", hash = "sha256:a0461110b7865f9a271aa1b51e516c9a95de9d696734a2f71e3e78f46e1d4678", size = 22876, upload-time = "2026-03-21T20:11:14.438Z" },
-]
-
-[[package]]
-name = "pytest-doctestplus"
-version = "1.7.1"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "packaging" },
-    { name = "pytest" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/59/43/6db18218cdfa15bd03cba3292345223925011ba7428e6183da97c6b1dcb1/pytest_doctestplus-1.7.1.tar.gz", hash = "sha256:64ae16dbda66c3db775ef596828d8d7adda09c6f34dd85099c119e4ff8cfe5b6", size = 50286, upload-time = "2026-01-26T22:13:46.54Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/f4/72/8e70c7c3238cba0afa8dbef94a1ce7d88ecd0fab3d8d0da394a1c3964a41/pytest_doctestplus-1.7.1-py3-none-any.whl", hash = "sha256:18c0ff78d7ad08a15f415b153b3c407078c8a8c055ceb9055b5c7be5eb7c80be", size = 25567, upload-time = "2026-01-26T22:13:45.148Z" },
 ]
 
 [[package]]
@@ -770,6 +757,20 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/e8/c4/ba2f8066cceb6f23394729afe52f3bf7adec04bf9ed2c820b39e19299111/sortedcontainers-2.4.0.tar.gz", hash = "sha256:25caa5a06cc30b6b83d11423433f65d1f9d76c4c6a0c90e3379eaa43b9bfdb88", size = 30594, upload-time = "2021-05-16T22:03:42.897Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/32/46/9cb0e58b2deb7f82b84065f37f3bffeb12413f947f9388e4cac22c4621ce/sortedcontainers-2.4.0-py2.py3-none-any.whl", hash = "sha256:a163dcaede0f1c021485e957a39245190e74249897e2ae4b2aa38595db237ee0", size = 29575, upload-time = "2021-05-16T22:03:41.177Z" },
+]
+
+[[package]]
+name = "sybil"
+version = "10.1.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/1c/03/50135b55ba14509654b2f624eaf7e318d654182ebe9f712fb74e98e418d0/sybil-10.1.0.tar.gz", hash = "sha256:062249c8886a0ab19e45d1c3afd5631ec806e7a95cf5153c96560f5e47756cbd", size = 82376, upload-time = "2026-06-13T09:40:44.584Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/f2/fe/4094754188b52f8333ba24b377192918936597769a574a9dd8446f69e1f1/sybil-10.1.0-py3-none-any.whl", hash = "sha256:b3015f7e0ca3fe197ae67117c440710b62ea500078d4414ebd0ab804d12c9897", size = 40930, upload-time = "2026-06-13T09:40:43.139Z" },
+]
+
+[package.optional-dependencies]
+pytest = [
+    { name = "pytest" },
 ]
 
 [[package]]
