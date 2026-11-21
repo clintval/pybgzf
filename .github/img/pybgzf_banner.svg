@@ -1,0 +1,187 @@
+<svg width="1200" height="300" viewBox="0 0 1200 300" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="pybgzf: a fan-fold listing of 9,200 sorted BED lines for chr1 and chr2 is cut every 65,280 bytes into four BGZF blocks plus an EOF marker, while a tabix index card records the virtual offset where each contig starts, written as features.bed.gz and features.bed.gz.tbi">
+<defs>
+<pattern id="hatch" width="5" height="5" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><line x1="0" y1="0" x2="0" y2="5" stroke="#75908c" stroke-width="1.1"/></pattern>
+</defs>
+<rect width="1200" height="300" fill="#dcebfa"/>
+<rect x="493" y="55" width="244" height="230" rx="2" fill="url(#hatch)"/>
+<rect x="486" y="46" width="244" height="230" rx="2" fill="#f4f8fc"/>
+<rect x="500" y="57" width="216" height="15" fill="#dcebfa" opacity="0.55"/>
+<rect x="500" y="87" width="216" height="15" fill="#dcebfa" opacity="0.55"/>
+<rect x="500" y="117" width="216" height="15" fill="#dcebfa" opacity="0.55"/>
+<rect x="500" y="147" width="216" height="15" fill="#dcebfa" opacity="0.55"/>
+<rect x="500" y="177" width="216" height="15" fill="#dcebfa" opacity="0.55"/>
+<rect x="500" y="207" width="216" height="15" fill="#dcebfa" opacity="0.55"/>
+<rect x="500" y="237" width="216" height="15" fill="#dcebfa" opacity="0.55"/>
+<line x1="500" y1="46" x2="500" y2="276" stroke="#75908c" stroke-width="0.9" stroke-dasharray="1.5 2.5"/>
+<line x1="716" y1="46" x2="716" y2="276" stroke="#75908c" stroke-width="0.9" stroke-dasharray="1.5 2.5"/>
+<circle cx="493" cy="55" r="2.7" fill="#dcebfa" stroke="#26443a" stroke-width="0.9"/>
+<circle cx="723" cy="55" r="2.7" fill="#dcebfa" stroke="#26443a" stroke-width="0.9"/>
+<circle cx="493" cy="68" r="2.7" fill="#dcebfa" stroke="#26443a" stroke-width="0.9"/>
+<circle cx="723" cy="68" r="2.7" fill="#dcebfa" stroke="#26443a" stroke-width="0.9"/>
+<circle cx="493" cy="81" r="2.7" fill="#dcebfa" stroke="#26443a" stroke-width="0.9"/>
+<circle cx="723" cy="81" r="2.7" fill="#dcebfa" stroke="#26443a" stroke-width="0.9"/>
+<circle cx="493" cy="94" r="2.7" fill="#dcebfa" stroke="#26443a" stroke-width="0.9"/>
+<circle cx="723" cy="94" r="2.7" fill="#dcebfa" stroke="#26443a" stroke-width="0.9"/>
+<circle cx="493" cy="107" r="2.7" fill="#dcebfa" stroke="#26443a" stroke-width="0.9"/>
+<circle cx="723" cy="107" r="2.7" fill="#dcebfa" stroke="#26443a" stroke-width="0.9"/>
+<circle cx="493" cy="120" r="2.7" fill="#dcebfa" stroke="#26443a" stroke-width="0.9"/>
+<circle cx="723" cy="120" r="2.7" fill="#dcebfa" stroke="#26443a" stroke-width="0.9"/>
+<circle cx="493" cy="133" r="2.7" fill="#dcebfa" stroke="#26443a" stroke-width="0.9"/>
+<circle cx="723" cy="133" r="2.7" fill="#dcebfa" stroke="#26443a" stroke-width="0.9"/>
+<circle cx="493" cy="146" r="2.7" fill="#dcebfa" stroke="#26443a" stroke-width="0.9"/>
+<circle cx="723" cy="146" r="2.7" fill="#dcebfa" stroke="#26443a" stroke-width="0.9"/>
+<circle cx="493" cy="159" r="2.7" fill="#dcebfa" stroke="#26443a" stroke-width="0.9"/>
+<circle cx="723" cy="159" r="2.7" fill="#dcebfa" stroke="#26443a" stroke-width="0.9"/>
+<circle cx="493" cy="172" r="2.7" fill="#dcebfa" stroke="#26443a" stroke-width="0.9"/>
+<circle cx="723" cy="172" r="2.7" fill="#dcebfa" stroke="#26443a" stroke-width="0.9"/>
+<circle cx="493" cy="185" r="2.7" fill="#dcebfa" stroke="#26443a" stroke-width="0.9"/>
+<circle cx="723" cy="185" r="2.7" fill="#dcebfa" stroke="#26443a" stroke-width="0.9"/>
+<circle cx="493" cy="198" r="2.7" fill="#dcebfa" stroke="#26443a" stroke-width="0.9"/>
+<circle cx="723" cy="198" r="2.7" fill="#dcebfa" stroke="#26443a" stroke-width="0.9"/>
+<circle cx="493" cy="211" r="2.7" fill="#dcebfa" stroke="#26443a" stroke-width="0.9"/>
+<circle cx="723" cy="211" r="2.7" fill="#dcebfa" stroke="#26443a" stroke-width="0.9"/>
+<circle cx="493" cy="224" r="2.7" fill="#dcebfa" stroke="#26443a" stroke-width="0.9"/>
+<circle cx="723" cy="224" r="2.7" fill="#dcebfa" stroke="#26443a" stroke-width="0.9"/>
+<circle cx="493" cy="237" r="2.7" fill="#dcebfa" stroke="#26443a" stroke-width="0.9"/>
+<circle cx="723" cy="237" r="2.7" fill="#dcebfa" stroke="#26443a" stroke-width="0.9"/>
+<circle cx="493" cy="250" r="2.7" fill="#dcebfa" stroke="#26443a" stroke-width="0.9"/>
+<circle cx="723" cy="250" r="2.7" fill="#dcebfa" stroke="#26443a" stroke-width="0.9"/>
+<circle cx="493" cy="263" r="2.7" fill="#dcebfa" stroke="#26443a" stroke-width="0.9"/>
+<circle cx="723" cy="263" r="2.7" fill="#dcebfa" stroke="#26443a" stroke-width="0.9"/>
+<rect x="486" y="46" width="244" height="230" rx="2" fill="none" stroke="#26443a" stroke-width="2.4"/>
+<text x="534" y="68" font-family="ui-monospace, Menlo, Consolas, monospace" font-size="8.5" fill="#75908c" text-anchor="end">1</text>
+<text x="541" y="68" font-family="ui-monospace, Menlo, Consolas, monospace" font-size="10" fill="#26443a"><tspan fill="#3d7563">chr1</tspan></text>
+<text x="571" y="68" font-family="ui-monospace, Menlo, Consolas, monospace" font-size="10" fill="#26443a">100</text>
+<text x="613" y="68" font-family="ui-monospace, Menlo, Consolas, monospace" font-size="10" fill="#26443a">200</text>
+<text x="655" y="68" font-family="ui-monospace, Menlo, Consolas, monospace" font-size="10" fill="#26443a">gene-a</text>
+<text x="534" y="83" font-family="ui-monospace, Menlo, Consolas, monospace" font-size="8.5" fill="#75908c" text-anchor="end">2</text>
+<text x="541" y="83" font-family="ui-monospace, Menlo, Consolas, monospace" font-size="10" fill="#26443a"><tspan fill="#3d7563">chr1</tspan></text>
+<text x="571" y="83" font-family="ui-monospace, Menlo, Consolas, monospace" font-size="10" fill="#26443a">150</text>
+<text x="613" y="83" font-family="ui-monospace, Menlo, Consolas, monospace" font-size="10" fill="#26443a">300</text>
+<text x="655" y="83" font-family="ui-monospace, Menlo, Consolas, monospace" font-size="10" fill="#26443a">gene-b</text>
+<text x="556" y="96" font-family="ui-monospace, Menlo, Consolas, monospace" font-size="11" fill="#4c6d63" text-anchor="middle">⋮</text>
+<line x1="504" y1="109" x2="712" y2="109" stroke="#26443a" stroke-width="1.1" stroke-dasharray="4 3"/>
+<rect x="571.2" y="102" width="105.6" height="14" rx="7" fill="#f4f8fc" stroke="#26443a" stroke-width="1"/>
+<text x="624" y="112" font-family="ui-monospace, Menlo, Consolas, monospace" font-size="8.5" fill="#26443a" text-anchor="middle">block 1 · 65,280 B</text>
+<text x="556" y="126" font-family="ui-monospace, Menlo, Consolas, monospace" font-size="11" fill="#4c6d63" text-anchor="middle">⋮</text>
+<line x1="504" y1="139" x2="712" y2="139" stroke="#26443a" stroke-width="1.1" stroke-dasharray="4 3"/>
+<rect x="571.2" y="132" width="105.6" height="14" rx="7" fill="#f4f8fc" stroke="#26443a" stroke-width="1"/>
+<text x="624" y="142" font-family="ui-monospace, Menlo, Consolas, monospace" font-size="8.5" fill="#26443a" text-anchor="middle">block 2 · 65,280 B</text>
+<text x="556" y="156" font-family="ui-monospace, Menlo, Consolas, monospace" font-size="11" fill="#4c6d63" text-anchor="middle">⋮</text>
+<text x="534" y="173" font-family="ui-monospace, Menlo, Consolas, monospace" font-size="8.5" fill="#75908c" text-anchor="end">6,000</text>
+<text x="541" y="173" font-family="ui-monospace, Menlo, Consolas, monospace" font-size="10" fill="#26443a"><tspan fill="#3d7563">chr1</tspan></text>
+<text x="571" y="173" font-family="ui-monospace, Menlo, Consolas, monospace" font-size="10" fill="#26443a">300050</text>
+<text x="613" y="173" font-family="ui-monospace, Menlo, Consolas, monospace" font-size="10" fill="#26443a">300200</text>
+<text x="655" y="173" font-family="ui-monospace, Menlo, Consolas, monospace" font-size="10" fill="#26443a">gene-hvt</text>
+<text x="534" y="188" font-family="ui-monospace, Menlo, Consolas, monospace" font-size="8.5" fill="#75908c" text-anchor="end">6,001</text>
+<text x="541" y="188" font-family="ui-monospace, Menlo, Consolas, monospace" font-size="10" fill="#26443a"><tspan fill="#866429">chr2</tspan></text>
+<text x="571" y="188" font-family="ui-monospace, Menlo, Consolas, monospace" font-size="10" fill="#26443a">10</text>
+<text x="613" y="188" font-family="ui-monospace, Menlo, Consolas, monospace" font-size="10" fill="#26443a">20</text>
+<text x="655" y="188" font-family="ui-monospace, Menlo, Consolas, monospace" font-size="10" fill="#26443a">gene-hvu</text>
+<text x="556" y="201" font-family="ui-monospace, Menlo, Consolas, monospace" font-size="11" fill="#4c6d63" text-anchor="middle">⋮</text>
+<line x1="504" y1="214" x2="712" y2="214" stroke="#26443a" stroke-width="1.1" stroke-dasharray="4 3"/>
+<rect x="571.2" y="207" width="105.6" height="14" rx="7" fill="#f4f8fc" stroke="#26443a" stroke-width="1"/>
+<text x="624" y="217" font-family="ui-monospace, Menlo, Consolas, monospace" font-size="8.5" fill="#26443a" text-anchor="middle">block 3 · 65,280 B</text>
+<text x="556" y="231" font-family="ui-monospace, Menlo, Consolas, monospace" font-size="11" fill="#4c6d63" text-anchor="middle">⋮</text>
+<text x="534" y="248" font-family="ui-monospace, Menlo, Consolas, monospace" font-size="8.5" fill="#75908c" text-anchor="end">9,200</text>
+<text x="541" y="248" font-family="ui-monospace, Menlo, Consolas, monospace" font-size="10" fill="#26443a"><tspan fill="#866429">chr2</tspan></text>
+<text x="571" y="248" font-family="ui-monospace, Menlo, Consolas, monospace" font-size="10" fill="#26443a">159960</text>
+<text x="613" y="248" font-family="ui-monospace, Menlo, Consolas, monospace" font-size="10" fill="#26443a">159970</text>
+<text x="655" y="248" font-family="ui-monospace, Menlo, Consolas, monospace" font-size="10" fill="#26443a">gene-mov</text>
+<line x1="504" y1="259" x2="712" y2="259" stroke="#26443a" stroke-width="1.1" stroke-dasharray="4 3"/>
+<rect x="571.2" y="252" width="105.6" height="14" rx="7" fill="#f4f8fc" stroke="#26443a" stroke-width="1"/>
+<text x="624" y="262" font-family="ui-monospace, Menlo, Consolas, monospace" font-size="8.5" fill="#26443a" text-anchor="middle">block 4 · 52,169 B</text>
+<line x1="504" y1="59" x2="504" y2="176" stroke="#4f7a6a" stroke-width="3" stroke-linecap="round"/>
+<line x1="504" y1="179" x2="504" y2="251" stroke="#c9a56a" stroke-width="3" stroke-linecap="round"/>
+<path d="M748,186 L765,205 L748,224" fill="none" stroke="#26443a" stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round"/>
+<rect x="790" y="192" width="66" height="46" rx="5" fill="url(#hatch)"/>
+<rect x="784" y="184" width="66" height="46" rx="5" fill="#f4f8fc"/>
+<path d="M784,194 L784,189 Q784,184 789,184 L845,184 Q850,184 850,189 L850,194 Z" fill="#c9a56a"/>
+<path d="M784,194 L784,189 Q784,184 789,184 L845,184 Q850,184 850,189 L850,194 Z" fill="#4f7a6a"/>
+<line x1="784" y1="194" x2="850" y2="194" stroke="#26443a" stroke-width="1.2"/>
+<text x="817" y="208" font-family="ui-monospace, Menlo, Consolas, monospace" font-size="8.5" fill="#75908c" text-anchor="middle">65,280 B</text>
+<path d="M813.0,211.5 L817.0,215 L821.0,211.5" fill="none" stroke="#75908c" stroke-width="1.1" stroke-linecap="round" stroke-linejoin="round"/>
+<text x="817" y="225" font-family="ui-monospace, Menlo, Consolas, monospace" font-size="9.5" fill="#26443a" text-anchor="middle">12,240 B</text>
+<rect x="784" y="184" width="66" height="46" rx="5" fill="none" stroke="#26443a" stroke-width="2"/>
+<rect x="866" y="192" width="66" height="46" rx="5" fill="url(#hatch)"/>
+<rect x="860" y="184" width="66" height="46" rx="5" fill="#f4f8fc"/>
+<path d="M860,194 L860,189 Q860,184 865,184 L921,184 Q926,184 926,189 L926,194 Z" fill="#c9a56a"/>
+<path d="M860,194 L860,189 Q860,184 865,184 L921,184 Q926,184 926,189 L926,194 Z" fill="#4f7a6a"/>
+<line x1="860" y1="194" x2="926" y2="194" stroke="#26443a" stroke-width="1.2"/>
+<text x="893" y="208" font-family="ui-monospace, Menlo, Consolas, monospace" font-size="8.5" fill="#75908c" text-anchor="middle">65,280 B</text>
+<path d="M889.0,211.5 L893.0,215 L897.0,211.5" fill="none" stroke="#75908c" stroke-width="1.1" stroke-linecap="round" stroke-linejoin="round"/>
+<text x="893" y="225" font-family="ui-monospace, Menlo, Consolas, monospace" font-size="9.5" fill="#26443a" text-anchor="middle">10,579 B</text>
+<rect x="860" y="184" width="66" height="46" rx="5" fill="none" stroke="#26443a" stroke-width="2"/>
+<line x1="850" y1="207.0" x2="860" y2="207.0" stroke="#26443a" stroke-width="1.6"/>
+<rect x="942" y="192" width="66" height="46" rx="5" fill="url(#hatch)"/>
+<rect x="936" y="184" width="66" height="46" rx="5" fill="#f4f8fc"/>
+<path d="M936,194 L936,189 Q936,184 941,184 L997,184 Q1002,184 1002,189 L1002,194 Z" fill="#c9a56a"/>
+<path d="M936,194 L936,189 Q936,184 941,184 L968.6,184 L968.6,194 Z" fill="#4f7a6a"/>
+<line x1="936" y1="194" x2="1002" y2="194" stroke="#26443a" stroke-width="1.2"/>
+<text x="969" y="208" font-family="ui-monospace, Menlo, Consolas, monospace" font-size="8.5" fill="#75908c" text-anchor="middle">65,280 B</text>
+<path d="M965.0,211.5 L969.0,215 L973.0,211.5" fill="none" stroke="#75908c" stroke-width="1.1" stroke-linecap="round" stroke-linejoin="round"/>
+<text x="969" y="225" font-family="ui-monospace, Menlo, Consolas, monospace" font-size="9.5" fill="#26443a" text-anchor="middle">12,689 B</text>
+<rect x="936" y="184" width="66" height="46" rx="5" fill="none" stroke="#26443a" stroke-width="2"/>
+<line x1="926" y1="207.0" x2="936" y2="207.0" stroke="#26443a" stroke-width="1.6"/>
+<rect x="1018" y="192" width="66" height="46" rx="5" fill="url(#hatch)"/>
+<rect x="1012" y="184" width="66" height="46" rx="5" fill="#f4f8fc"/>
+<path d="M1012,194 L1012,189 Q1012,184 1017,184 L1073,184 Q1078,184 1078,189 L1078,194 Z" fill="#c9a56a"/>
+<line x1="1012" y1="194" x2="1078" y2="194" stroke="#26443a" stroke-width="1.2"/>
+<text x="1045" y="208" font-family="ui-monospace, Menlo, Consolas, monospace" font-size="8.5" fill="#75908c" text-anchor="middle">52,169 B</text>
+<path d="M1041.0,211.5 L1045.0,215 L1049.0,211.5" fill="none" stroke="#75908c" stroke-width="1.1" stroke-linecap="round" stroke-linejoin="round"/>
+<text x="1045" y="225" font-family="ui-monospace, Menlo, Consolas, monospace" font-size="9.5" fill="#26443a" text-anchor="middle">10,165 B</text>
+<rect x="1012" y="184" width="66" height="46" rx="5" fill="none" stroke="#26443a" stroke-width="2"/>
+<line x1="1002" y1="207.0" x2="1012" y2="207.0" stroke="#26443a" stroke-width="1.6"/>
+<line x1="1078" y1="207.0" x2="1088" y2="207.0" stroke="#75908c" stroke-width="1.4" stroke-dasharray="2 2"/>
+<rect x="1088" y="194" width="34" height="36" rx="5" fill="none" stroke="#75908c" stroke-width="1.4" stroke-dasharray="3 3"/>
+<text x="1105" y="210" font-family="ui-monospace, Menlo, Consolas, monospace" font-size="8.5" fill="#4c6d63" text-anchor="middle">EOF</text>
+<text x="1105" y="225" font-family="ui-monospace, Menlo, Consolas, monospace" font-size="8.5" fill="#4c6d63" text-anchor="middle">28 B</text>
+<g stroke="#75908c" stroke-width="1.1" stroke-linecap="round">
+<line x1="784" y1="243" x2="1122" y2="243"/>
+<line x1="784" y1="243" x2="784" y2="237"/>
+<line x1="860" y1="243" x2="860" y2="237"/>
+<line x1="936" y1="243" x2="936" y2="237"/>
+<line x1="1012" y1="243" x2="1012" y2="237"/>
+<line x1="1088" y1="243" x2="1088" y2="237"/>
+</g>
+<text x="784" y="255" font-family="ui-monospace, Menlo, Consolas, monospace" font-size="8.5" fill="#4c6d63">0</text>
+<text x="860" y="255" font-family="ui-monospace, Menlo, Consolas, monospace" font-size="8.5" fill="#4c6d63">12,240</text>
+<text x="936" y="255" font-family="ui-monospace, Menlo, Consolas, monospace" font-size="8.5" fill="#46658f">22,819</text>
+<text x="1012" y="255" font-family="ui-monospace, Menlo, Consolas, monospace" font-size="8.5" fill="#4c6d63">35,508</text>
+<text x="1088" y="255" font-family="ui-monospace, Menlo, Consolas, monospace" font-size="8.5" fill="#4c6d63">45,673</text>
+<text x="784" y="277" font-family="ui-monospace, Menlo, Consolas, monospace" font-size="11" fill="#26443a">features.bed.gz</text>
+<text x="1122" y="277" font-family="Georgia, 'Times New Roman', serif" font-style="italic" font-size="12.5" fill="#4c6d63" text-anchor="end">248,009 bytes in, 45,701 out</text>
+<rect x="791" y="55" width="362" height="102" rx="6" fill="url(#hatch)"/>
+<rect x="784" y="46" width="362" height="102" rx="6" fill="#f4f8fc"/>
+<rect x="784" y="46" width="362" height="102" rx="6" fill="none" stroke="#26443a" stroke-width="2.4"/>
+<text x="798" y="66" font-family="ui-monospace, Menlo, Consolas, monospace" font-size="11.5" fill="#26443a">features.bed.gz.tbi</text>
+<text x="1132" y="66" font-family="Georgia, 'Times New Roman', serif" font-style="italic" font-size="12.5" fill="#4c6d63" text-anchor="end">filled in as the lines pass</text>
+<line x1="796" y1="75" x2="1134" y2="75" stroke="#75908c" stroke-width="1"/>
+<rect x="798" y="86" width="16" height="7" rx="2.6" fill="#4f7a6a" stroke="#26443a" stroke-width="1"/>
+<text x="822" y="93" font-family="ui-monospace, Menlo, Consolas, monospace" font-size="11" fill="#26443a"><tspan fill="#3d7563">chr1</tspan></text>
+<text x="862" y="93" font-family="ui-monospace, Menlo, Consolas, monospace" font-size="11" fill="#26443a">6,000 lines</text>
+<text x="1022" y="93" font-family="ui-monospace, Menlo, Consolas, monospace" font-size="11" fill="#26443a" text-anchor="end">0x0</text>
+<text x="1034" y="93" font-family="ui-monospace, Menlo, Consolas, monospace" font-size="11" fill="#4c6d63" text-anchor="middle">→</text>
+<text x="1046" y="93" font-family="ui-monospace, Menlo, Consolas, monospace" font-size="11" fill="#26443a"><tspan fill="#46658f">0x59237e25</tspan></text>
+<rect x="798" y="104" width="16" height="7" rx="2.6" fill="#c9a56a" stroke="#26443a" stroke-width="1"/>
+<text x="822" y="111" font-family="ui-monospace, Menlo, Consolas, monospace" font-size="11" fill="#26443a"><tspan fill="#866429">chr2</tspan></text>
+<text x="862" y="111" font-family="ui-monospace, Menlo, Consolas, monospace" font-size="11" fill="#26443a">3,200 lines</text>
+<text x="1022" y="111" font-family="ui-monospace, Menlo, Consolas, monospace" font-size="11" fill="#26443a" text-anchor="end"><tspan fill="#46658f">0x59237e25</tspan></text>
+<text x="1034" y="111" font-family="ui-monospace, Menlo, Consolas, monospace" font-size="11" fill="#4c6d63" text-anchor="middle">→</text>
+<text x="1046" y="111" font-family="ui-monospace, Menlo, Consolas, monospace" font-size="11" fill="#26443a">0xb2690000</text>
+<line x1="796" y1="121" x2="1134" y2="121" stroke="#75908c" stroke-width="1" stroke-dasharray="3 4" stroke-linecap="round"/>
+<text x="798" y="135" font-family="ui-monospace, Menlo, Consolas, monospace" font-size="11" fill="#26443a">tell() → <tspan fill="#46658f">0x59237e25</tspan> = <tspan fill="#46658f">22819</tspan> &lt;&lt; 16 | 32293</text>
+<path d="M960.2,139 L960.2,164 L936,164 L936,183" fill="none" stroke="#7a99bd" stroke-width="1.3" stroke-linejoin="round" stroke-dasharray="2 2.5"/>
+<circle cx="936" cy="184" r="2.8" fill="#f4f8fc" stroke="#7a99bd" stroke-width="1.4"/>
+<path d="M1052.9,139 L1052.9,171 L968.6,171 L968.6,183" fill="none" stroke="#26443a" stroke-width="1.3" stroke-linejoin="round" stroke-dasharray="2 2.5"/>
+<circle cx="968.6" cy="184" r="2.8" fill="#f4f8fc" stroke="#26443a" stroke-width="1.4"/>
+<g font-family="Georgia, 'Times New Roman', serif" fill="#26443a">
+<text x="96" y="150" font-size="104" letter-spacing="1">pybgzf</text>
+<path d="M102,186 Q257,178 412,184" fill="none" stroke="#26443a" stroke-width="1.6" stroke-linecap="round"/>
+<text x="257" y="216" text-anchor="middle" font-size="19" font-style="italic" fill="#4c6d63">One pass, index included.</text>
+</g>
+<g font-family="Georgia, 'Times New Roman', serif" font-style="italic" font-size="13.5" fill="#4c6d63">
+<text x="608" y="34" text-anchor="middle">9,200 sorted lines in</text>
+</g>
+<text x="965" y="34" font-family="ui-monospace, Menlo, Consolas, monospace" font-size="9.5" fill="#4c6d63" text-anchor="middle">pybgzf.writer(path, index=IndexFormat.TBI, columns=Columns.BED)</text>
+</svg>
