@@ -1,4 +1,6 @@
-# pybgzf
+![Banner for pybgzf](https://raw.githubusercontent.com/clintval/pybgzf/main/.github/img/pybgzf_banner.svg)
+
+---
 
 [![Build Status](https://github.com/clintval/pybgzf/actions/workflows/tests.yml/badge.svg?branch=main)](https://github.com/clintval/pybgzf/actions/workflows/tests.yml?query=branch%3Amain)
 [![Python Versions](https://img.shields.io/badge/python-3.11_|_3.12_|_3.13_|_3.14-blue)](https://github.com/clintval/pybgzf)
